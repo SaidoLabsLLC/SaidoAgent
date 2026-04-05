@@ -3,7 +3,7 @@
 **Product:** Saido Agent
 **Phase:** 1 — Foundation
 **Date Started:** 2026-04-05
-**Status:** In Progress
+**Status:** Complete — All 14 build prompts executed, 473+ tests passing
 
 ---
 
@@ -134,4 +134,43 @@ knowledge/                      # Root knowledge directory
 
 ---
 
-*Last updated: 2026-04-05 — Wave 2 complete, Wave 3 in progress*
+## 9. Test Infrastructure
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Test framework | pytest | Standard Python test framework, already in use |
+| Test organization | tests/ with test_ prefix per module | Standard pytest discovery |
+| Fixtures | tests/fixtures/ with sample.py and sample.md | Real files for ingest/structural analysis testing |
+| Mocking strategy | unittest.mock for LLM calls, bridge operations | Avoid requiring running LLM for unit tests |
+| Total test count | 473+ tests across 11 test files | Comprehensive coverage of all Phase 1 modules |
+
+### Test Files
+| File | Tests | Coverage |
+|------|-------|----------|
+| test_shell_security.py | 89 | CRIT-1 shell hardening |
+| test_plugin_security.py | 41 | CRIT-2 plugin system |
+| test_path_sandbox.py | 31 | CRIT-3 path sandboxing |
+| test_high_security.py | 13 | HIGH-1 through HIGH-4 |
+| test_routing.py | 32 | Model routing + cost tracking |
+| test_knowledge_bridge.py | 37 | SmartRAG integration |
+| test_ingest.py | 56 | Ingest pipeline + ast-grep |
+| test_memory.py | 31 | Session persistence + memory |
+| test_compile.py | 35 | LLM compile enrichment |
+| test_query.py | 36 | Knowledge Q&A + citations |
+| test_sdk.py | 38 | Public SDK API |
+| test_cli.py | 35 | CLI/REPL commands |
+
+## 10. Build Execution Timeline
+
+| Wave | Prompts | Duration | Tests Added |
+|------|---------|----------|-------------|
+| 1 | P1-01 (Foundation) | ~22 min | CLI boot verification |
+| 2 | P1-02,03,04,05,06 (parallel) | ~7 min | 205 |
+| 3 | P1-07,08,11 (parallel) | ~7 min | 124 |
+| 4 | P1-09,10 (parallel) | ~4 min | 71 |
+| 5 | P1-12,13 (parallel) | ~6 min | 73 |
+| Gate | P1-14 + reviews (parallel) | In progress | TBD |
+
+---
+
+*Last updated: 2026-04-05 — Phase 1 build complete, gate reviews in progress*
