@@ -122,9 +122,21 @@ async def health_check():
 
 from saido_agent.api.routes import v1_router  # noqa: E402
 from saido_agent.api.websocket import ws_router  # noqa: E402
+from saido_agent.api.enterprise_routes import (  # noqa: E402
+    enterprise_router,
+    sso_router,
+    mobile_router,
+    add_api_version_header,
+)
 
 app.include_router(v1_router)
 app.include_router(ws_router)
+app.include_router(enterprise_router)
+app.include_router(sso_router)
+app.include_router(mobile_router)
+
+# Add API versioning header for mobile clients
+add_api_version_header(app)
 
 
 # ---------------------------------------------------------------------------

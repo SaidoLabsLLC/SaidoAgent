@@ -22,6 +22,7 @@ from .loader import (
 from .sandbox import sandboxed_import_plugin_module, BLOCKED_MODULES, DEFAULT_ALLOWED_MODULES
 from .verify import verify_manifest_signature, sign_manifest, is_trusted_source, classify_source
 from .recommend import recommend_plugins, recommend_from_files, format_recommendations
+from .marketplace import PluginMarketplace, MarketplaceEntry, SubmissionResult
 
 __all__ = [
     "PluginManifest", "PluginEntry", "PluginScope",
@@ -40,4 +41,5 @@ __all__ = [
     "sandboxed_import_plugin_module", "BLOCKED_MODULES", "DEFAULT_ALLOWED_MODULES",
     "verify_manifest_signature", "sign_manifest", "is_trusted_source", "classify_source",
     "recommend_plugins", "recommend_from_files", "format_recommendations",
+    "PluginMarketplace", "MarketplaceEntry", "SubmissionResult",
 ]
