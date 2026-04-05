@@ -55,6 +55,8 @@ Slash commands in REPL:
 
 Knowledge commands:
   /ingest <path>    Ingest a file or directory into the knowledge store
+  /ingest-url <url> Fetch and ingest a web page
+  /ingest-search <query>  Search web and ingest top results
   /ingest-status    Show compile queue status
   /docs             List all knowledge articles with summaries
   /docs <slug>      Display a specific article
@@ -63,6 +65,10 @@ Knowledge commands:
   /lint             Full knowledge store health check
   /lint <slug>      Check specific article health
   /lint --fix       Auto-fix suggestions for issues found
+  /reindex          Incremental LLM reindex (summaries, concepts, categories)
+  /reindex --full   Full reindex (re-process ALL articles)
+  /concepts         Display concept map as formatted output
+  /categories       Display category hierarchy
   /refresh          Re-probe local models via ModelRouter
   /cloud <message>  Force cloud model for a single query
   /stats            Display knowledge store statistics
@@ -907,6 +913,160 @@ def cmd_mcp(args: str, _state, _config) -> bool:
     return True
 
 
+# ── MCP ingest commands ─────────────────────────────────────────────────────
+
+
+def cmd_ingest_mcp(args: str, _state, config) -> bool:
+    """Call an MCP tool and ingest its result into the knowledge store.
+
+    /ingest-mcp <server> <tool> [params_json]
+    """
+    from saido_agent.mcp.client import get_mcp_manager
+    from saido_agent.mcp.ingest_bridge import MCPIngestBridge
+
+    parts = args.split(None, 2)
+    if len(parts) < 2:
+        err("Usage: /ingest-mcp <server> <tool> [params_json]")
+        return True
+
+    server_name = parts[0]
+    tool_name = parts[1]
+    params: dict = {}
+    if len(parts) > 2:
+        try:
+            params = json.loads(parts[2])
+        except json.JSONDecodeError as exc:
+            err(f"Invalid JSON params: {exc}")
+            return True
+
+    kctx = config.get("_knowledge_context", {})
+    bridge = kctx.get("bridge")
+    if bridge is None:
+        err("Knowledge bridge not available (SmartRAG not installed?)")
+        return True
+
+    mgr = get_mcp_manager()
+    ib = MCPIngestBridge(mcp_manager=mgr, knowledge_bridge=bridge)
+    result = ib.call_and_ingest(server_name, tool_name, params)
+
+    if result["status"] == "ok":
+        ok(f"Ingested as article: {result['slug']}")
+    else:
+        err(f"Ingest failed: {result.get('error', 'unknown')}")
+    return True
+
+
+def cmd_mcp_setup(args: str, _state, _config) -> bool:
+    """Guided setup from a recipe template.
+
+    /mcp-setup <recipe_name>
+    """
+    from saido_agent.mcp.ingest_bridge import load_recipe, list_recipes
+    from saido_agent.mcp.config import add_server_to_user_config
+
+    recipe_name = args.strip()
+    if not recipe_name:
+        names = list_recipes()
+        if names:
+            info("Available recipes:")
+            for name in names:
+                print(f"  {clr(name, 'cyan')}")
+            info("Usage: /mcp-setup <recipe_name>")
+        else:
+            err("No recipes available")
+        return True
+
+    try:
+        recipe = load_recipe(recipe_name)
+    except FileNotFoundError:
+        err(f"Recipe not found: {recipe_name}")
+        names = list_recipes()
+        if names:
+            info(f"Available: {', '.join(names)}")
+        return True
+    except ValueError as exc:
+        err(str(exc))
+        return True
+
+    info(f"Recipe: {recipe['name']} -- {recipe['description']}")
+
+    if "install" in recipe:
+        info(f"Install command: {recipe['install']}")
+
+    # Build MCP server config from recipe
+    raw: dict = {"type": "stdio"}
+    if "command" in recipe:
+        cmd_parts = recipe["command"]
+        if isinstance(cmd_parts, list) and cmd_parts:
+            raw["command"] = cmd_parts[0]
+            if len(cmd_parts) > 1:
+                raw["args"] = cmd_parts[1:]
+        elif isinstance(cmd_parts, str):
+            raw["command"] = cmd_parts
+
+    server_name = recipe["name"]
+
+    # Validate command before saving
+    if "command" in raw:
+        from saido_agent.mcp.client import validate_mcp_command
+        from saido_agent.mcp.types import MCPServerConfig
+        test_config = MCPServerConfig.from_dict(server_name, raw)
+        validation_error = validate_mcp_command(test_config)
+        if validation_error:
+            err(f"Recipe command failed validation: {validation_error}")
+            return True
+
+    add_server_to_user_config(server_name, raw)
+    ok(f"Added '{server_name}' to user MCP config")
+
+    # Configure auto-ingest if recipe specifies it
+    if recipe.get("auto_ingest") and "ingest_tools" in recipe:
+        from saido_agent.mcp.ingest_bridge import MCPIngestBridge
+        ib = MCPIngestBridge(mcp_manager=None, knowledge_bridge=None)
+        for tool in recipe["ingest_tools"]:
+            ib.configure_auto_ingest(server_name, tool, enabled=True)
+        ok(f"Auto-ingest enabled for: {', '.join(recipe['ingest_tools'])}")
+
+    info("Run /mcp reload to connect")
+    return True
+
+
+def cmd_mcp_auto(args: str, _state, _config) -> bool:
+    """Toggle auto-ingest for a tool.
+
+    /mcp-auto <server> <tool> [on|off]
+    """
+    from saido_agent.mcp.ingest_bridge import MCPIngestBridge
+
+    parts = args.split()
+    if len(parts) < 2:
+        # Show current auto-ingest config
+        ib = MCPIngestBridge(mcp_manager=None, knowledge_bridge=None)
+        ai_config = ib.get_auto_ingest_config()
+        if not ai_config:
+            info("No auto-ingest rules configured")
+        else:
+            info("Auto-ingest configuration:")
+            for server, tools in ai_config.items():
+                for tool, enabled in tools.items():
+                    state_str = clr("on", "green") if enabled else clr("off", "dim")
+                    print(f"  {server}/{tool}: {state_str}")
+        if len(parts) == 0:
+            info("Usage: /mcp-auto <server> <tool> [on|off]")
+        return True
+
+    server_name = parts[0]
+    tool_name = parts[1]
+    toggle = parts[2].lower() if len(parts) > 2 else "on"
+    enabled = toggle in ("on", "true", "1", "yes")
+
+    ib = MCPIngestBridge(mcp_manager=None, knowledge_bridge=None)
+    ib.configure_auto_ingest(server_name, tool_name, enabled=enabled)
+    state_str = "enabled" if enabled else "disabled"
+    ok(f"Auto-ingest {state_str} for {server_name}/{tool_name}")
+    return True
+
+
 def cmd_plugin(args: str, _state, _config) -> bool:
     """Manage plugins.
 
@@ -1330,6 +1490,53 @@ def cmd_ingest(args: str, _state, config) -> bool:
     return True
 
 
+def cmd_ingest_url(args: str, _state, config) -> bool:
+    """Fetch and ingest a URL into the knowledge store."""
+    kctx = _get_kctx(config)
+    pipeline = kctx.get("ingest_pipeline")
+    if pipeline is None:
+        err("Knowledge subsystem not available. SmartRAG may not be installed.")
+        return True
+    url = args.strip()
+    if not url:
+        err("Usage: /ingest-url <url>")
+        return True
+    info(f"Fetching and ingesting: {url}")
+    result = pipeline.ingest_url(url)
+    if result["status"] == "ok":
+        ok(f"Ingested: {url} -> slug: {result['slug']}")
+        if result.get("title"):
+            info(f"  Title: {result['title']}")
+    else:
+        err(f"Failed: {result.get('error', 'unknown error')}")
+    return True
+
+
+def cmd_ingest_search(args: str, _state, config) -> bool:
+    """Search the web and ingest top results."""
+    kctx = _get_kctx(config)
+    pipeline = kctx.get("ingest_pipeline")
+    if pipeline is None:
+        err("Knowledge subsystem not available. SmartRAG may not be installed.")
+        return True
+    query = args.strip()
+    if not query:
+        err("Usage: /ingest-search <query>")
+        return True
+    info(f"Searching and ingesting: {query}")
+    results = pipeline.ingest_search(query)
+    ok_count = sum(1 for r in results if r["status"] == "ok")
+    err_count = sum(1 for r in results if r["status"] == "error")
+    info(f"Ingested {ok_count} result(s) from search")
+    if err_count:
+        warn(f"{err_count} result(s) had errors")
+    for r in results:
+        status_clr = "green" if r["status"] == "ok" else "red"
+        title = r.get("title") or r.get("url", "unknown")
+        print(clr(f"  {r['status']:7s} {title}", status_clr))
+    return True
+
+
 def cmd_ingest_status(_args: str, _state, config) -> bool:
     """Show compile queue status."""
     kctx = _get_kctx(config)
@@ -1600,6 +1807,105 @@ def cmd_stats(_args: str, _state, config) -> bool:
     return True
 
 
+def cmd_reindex(args: str, _state, config) -> bool:
+    """Run LLM-powered reindex (enriched summaries, concept map, category tree)."""
+    kctx = _get_kctx(config)
+    bridge = kctx.get("bridge")
+    if bridge is None or not bridge.available:
+        err("Knowledge subsystem not available.")
+        return True
+
+    from saido_agent.knowledge.index import WikiIndexer
+
+    router = kctx.get("model_router")
+    indexer = WikiIndexer(bridge, model_router=router)
+    full = args.strip() == "--full"
+    mode = "full" if full else "incremental"
+    info(f"Running {mode} reindex...")
+
+    try:
+        result = indexer.reindex(full=full)
+        ok(f"Reindex complete in {result.duration_ms}ms:")
+        info(f"  Processed: {result.articles_processed}")
+        info(f"  Skipped:   {result.articles_skipped}")
+        info(f"  Concept map updated: {result.concept_map_updated}")
+        info(f"  Category tree updated: {result.category_tree_updated}")
+        if result.errors:
+            for e in result.errors:
+                warn(f"  {e}")
+    except Exception as e:
+        err(f"Reindex failed: {e}")
+    return True
+
+
+def cmd_concepts(_args: str, _state, config) -> bool:
+    """Display the concept map as formatted output."""
+    kctx = _get_kctx(config)
+    bridge = kctx.get("bridge")
+    if bridge is None or not bridge.available:
+        err("Knowledge subsystem not available.")
+        return True
+
+    from saido_agent.knowledge.index import WikiIndexer
+
+    indexer = WikiIndexer(bridge)
+    cmap = indexer.load_concept_map()
+    nodes = cmap.get("nodes", [])
+    edges = cmap.get("edges", [])
+
+    if not nodes:
+        warn("No concept map found. Run /reindex first.")
+        return True
+
+    info(f"Concept Map: {len(nodes)} concepts, {len(edges)} relationships")
+    info("")
+    info("Concepts:")
+    for node in sorted(nodes, key=lambda n: n.get("articles", 0), reverse=True):
+        print(f"  {node['label']} ({node['articles']} articles)")
+
+    if edges:
+        info("")
+        info("Relationships:")
+        for edge in edges:
+            print(f"  {edge['source']} --[{edge['relation']}]--> {edge['target']}")
+
+    return True
+
+
+def cmd_categories(_args: str, _state, config) -> bool:
+    """Display the category hierarchy."""
+    kctx = _get_kctx(config)
+    bridge = kctx.get("bridge")
+    if bridge is None or not bridge.available:
+        err("Knowledge subsystem not available.")
+        return True
+
+    from saido_agent.knowledge.index import WikiIndexer
+
+    indexer = WikiIndexer(bridge)
+    tree = indexer.load_category_tree()
+    root = tree.get("root", [])
+
+    if not root:
+        warn("No category tree found. Run /reindex first.")
+        return True
+
+    info("Category Tree:")
+
+    def _print_tree(items, indent=1):
+        for item in items:
+            if isinstance(item, str):
+                print(f"{'  ' * indent}- {item}")
+            elif isinstance(item, dict):
+                print(f"{'  ' * indent}- {item.get('name', '?')}")
+                children = item.get("children", [])
+                if children:
+                    _print_tree(children, indent + 1)
+
+    _print_tree(root)
+    return True
+
+
 COMMANDS = {
     "help":           cmd_help,
     "clear":          cmd_clear,
@@ -1625,6 +1931,8 @@ COMMANDS = {
     "task":           cmd_tasks,
     "voice":          cmd_voice,
     "ingest":         cmd_ingest,
+    "ingest-url":     cmd_ingest_url,
+    "ingest-search":  cmd_ingest_search,
     "ingest-status":  cmd_ingest_status,
     "docs":           cmd_docs,
     "search":         cmd_search,
@@ -1633,9 +1941,15 @@ COMMANDS = {
     "refresh":        cmd_refresh,
     "cloud":          cmd_cloud,
     "stats":          cmd_stats,
+    "reindex":        cmd_reindex,
+    "concepts":       cmd_concepts,
+    "categories":     cmd_categories,
     "exit":           cmd_exit,
     "quit":           cmd_exit,
     "resume":         cmd_resume,
+    "ingest-mcp":     cmd_ingest_mcp,
+    "mcp-setup":      cmd_mcp_setup,
+    "mcp-auto":       cmd_mcp_auto,
 }
 
 
@@ -1747,6 +2061,12 @@ def _init_knowledge_context(config: dict) -> dict:
     try:
         from saido_agent.knowledge.query import KnowledgeQA
         kctx["knowledge_qa"] = KnowledgeQA(bridge, model_router=kctx["model_router"])
+    except Exception:
+        pass
+
+    try:
+        from saido_agent.knowledge.index import WikiIndexer
+        kctx["wiki_indexer"] = WikiIndexer(bridge, model_router=kctx["model_router"])
     except Exception:
         pass
 

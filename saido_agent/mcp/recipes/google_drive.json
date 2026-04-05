@@ -1,0 +1,7 @@
+{
+    "name": "google-drive",
+    "description": "Read documents from Google Drive",
+    "tools": ["read_file", "search_files"],
+    "auto_ingest": true,
+    "ingest_tools": ["read_file"]
+}

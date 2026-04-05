@@ -49,6 +49,15 @@ class IngestRequest(BaseModel):
     metadata: Optional[dict] = None
 
 
+class ClipRequest(BaseModel):
+    """Request body for POST /v1/clip (web clipper)."""
+
+    url: Optional[str] = None
+    html: Optional[str] = None
+    selection: Optional[str] = None
+    title: Optional[str] = None
+
+
 class AgentRequest(BaseModel):
     """Request body for POST /v1/agent."""
 
@@ -136,6 +145,14 @@ class TokenResponse(BaseModel):
     token: str
     tenant_id: str
     expires_in: int = 3600
+
+
+class ClipResponse(BaseModel):
+    url: Optional[str] = None
+    slug: Optional[str] = None
+    title: Optional[str] = None
+    status: str
+    error: Optional[str] = None
 
 
 class KeyCreatedResponse(BaseModel):
@@ -259,6 +276,89 @@ async def ingest_upload(
         raise HTTPException(status_code=500, detail=str(exc))
     finally:
         Path(tmp_path).unlink(missing_ok=True)
+
+
+# -- Web clipper -----------------------------------------------------------
+
+@v1_router.post("/clip", response_model=ClipResponse, tags=["ingest"])
+async def clip_web_content(
+    body: ClipRequest,
+    tenant_id: str = Depends(get_current_tenant),
+):
+    """Accept browser-clipped content and ingest it.
+
+    Accepts three modes (checked in priority order):
+
+    1. **selection** — ingest just the user-selected text.
+    2. **html** — extract text from the provided HTML and ingest.
+    3. **url** — fetch the page, extract text, and ingest.
+
+    At least one of ``url``, ``html``, or ``selection`` must be provided.
+
+    **Bookmarklet** (paste into browser bookmark URL field)::
+
+        javascript:void(
+          fetch('YOUR_SERVER/v1/clip', {
+            method:'POST',
+            headers:{'Content-Type':'application/json','Authorization':'Bearer TOKEN'},
+            body:JSON.stringify({
+              url:location.href,
+              html:document.documentElement.outerHTML,
+              selection:window.getSelection().toString()
+            })
+          }).then(r=>r.json()).then(d=>alert(d.status==='ok'?'Clipped!':d.error))
+        )
+    """
+    agent = _get_tenant_agent(tenant_id)
+    pipeline = getattr(agent, "_ingest_pipeline", None)
+    if pipeline is None:
+        # Try to get pipeline from the knowledge context
+        pipeline = getattr(agent, "ingest_pipeline", None)
+
+    if pipeline is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Ingest pipeline not available",
+        )
+
+    # Determine ingest mode
+    if body.selection and body.selection.strip():
+        result = await asyncio.to_thread(
+            pipeline.ingest_selection,
+            body.selection,
+            url=body.url or "",
+            title=body.title or "",
+        )
+    elif body.html and body.html.strip():
+        result = await asyncio.to_thread(
+            pipeline.ingest_html,
+            body.html,
+            url=body.url or "",
+            title=body.title or "",
+        )
+    elif body.url and body.url.strip():
+        result = await asyncio.to_thread(pipeline.ingest_url, body.url)
+    else:
+        raise HTTPException(
+            status_code=422,
+            detail="At least one of url, html, or selection must be provided",
+        )
+
+    if result.get("status") == "error":
+        return ClipResponse(
+            url=body.url,
+            slug=result.get("slug"),
+            title=result.get("title"),
+            status="error",
+            error=result.get("error"),
+        )
+
+    return ClipResponse(
+        url=body.url,
+        slug=result.get("slug"),
+        title=result.get("title"),
+        status="ok",
+    )
 
 
 # -- Query -----------------------------------------------------------------

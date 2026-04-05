@@ -6,17 +6,40 @@ Orchestrates: SmartRAG storage (via bridge) + ast-grep structural analysis
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
+import httpx
+from bs4 import BeautifulSoup, Comment
+
+from saido_agent.core.ssrf import validate_url
 from saido_agent.knowledge.structural import CodeStructure, StructuralAnalyzer
 
 if TYPE_CHECKING:
     pass  # KnowledgeBridge type will be available when bridge is built
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# HTML extraction settings
+# ---------------------------------------------------------------------------
+
+# Tags to strip entirely (including their content)
+_STRIP_TAGS: frozenset[str] = frozenset({
+    "nav", "footer", "script", "style", "aside", "header",
+    "noscript", "iframe", "svg",
+})
+
+# Default fetch timeout in seconds
+_FETCH_TIMEOUT: float = 30.0
+
+# User-Agent for outgoing requests
+_USER_AGENT: str = "SaidoAgent/0.1 (knowledge-ingest)"
 
 # ---------------------------------------------------------------------------
 # Supported file types
@@ -212,6 +235,229 @@ class IngestPipeline:
         self._compile_queue.clear()
         return results
 
+    # -- web ingest API -----------------------------------------------------
+
+    def ingest_url(self, url: str) -> dict:
+        """Fetch URL, extract text, ingest into knowledge store.
+
+        Returns a result dict::
+
+            {
+                "url": str,
+                "slug": str | None,
+                "status": "ok" | "error",
+                "title": str | None,
+                "metadata": dict | None,
+                "error": str | None,
+            }
+        """
+        result: dict[str, Any] = {
+            "url": url,
+            "slug": None,
+            "status": "error",
+            "title": None,
+            "metadata": None,
+            "error": None,
+        }
+
+        # 1. SSRF validation
+        is_safe, reason = validate_url(url)
+        if not is_safe:
+            result["error"] = f"SSRF blocked: {reason}"
+            log.warning("ingest_url: SSRF blocked %s — %s", url, reason)
+            return result
+
+        # 2. Fetch with httpx
+        try:
+            html = self._fetch_url(url)
+        except Exception as exc:
+            result["error"] = f"Fetch failed: {exc}"
+            log.error("ingest_url: fetch failed for %s: %s", url, exc)
+            return result
+
+        # 3. Extract content from HTML
+        extracted = extract_html_content(html, source_url=url)
+        title = extracted.get("title") or _slug_from_url(url)
+        text = extracted.get("text", "")
+
+        if not text.strip():
+            result["error"] = "No text content extracted"
+            return result
+
+        result["title"] = title
+        result["metadata"] = {
+            "source_url": url,
+            "canonical_url": extracted.get("canonical_url"),
+            "description": extracted.get("description"),
+            "publish_date": extracted.get("publish_date"),
+        }
+
+        # 4. Generate slug from title
+        slug = _slugify(title)
+
+        # 5. Store via bridge
+        try:
+            if self._bridge is not None and hasattr(self._bridge, "create_article"):
+                frontmatter = {
+                    "source_url": url,
+                    "source_type": "web",
+                    **(result["metadata"] or {}),
+                }
+                self._bridge.create_article(slug, text, frontmatter=frontmatter)
+            result["slug"] = slug
+        except Exception as exc:
+            log.error("ingest_url: bridge storage failed for %s: %s", url, exc)
+            result["error"] = f"Storage failed: {exc}"
+            return result
+
+        # 6. Queue for compile
+        self._compile_queue.append(slug)
+        result["status"] = "ok"
+        return result
+
+    def ingest_html(self, html: str, url: str = "", title: str = "") -> dict:
+        """Ingest pre-fetched HTML content (e.g. from browser clipper).
+
+        Returns the same result dict shape as :meth:`ingest_url`.
+        """
+        result: dict[str, Any] = {
+            "url": url,
+            "slug": None,
+            "status": "error",
+            "title": None,
+            "metadata": None,
+            "error": None,
+        }
+
+        extracted = extract_html_content(html, source_url=url)
+        title = title or extracted.get("title") or _slug_from_url(url) or "untitled-clip"
+        text = extracted.get("text", "")
+
+        if not text.strip():
+            result["error"] = "No text content extracted"
+            return result
+
+        result["title"] = title
+        slug = _slugify(title)
+
+        try:
+            if self._bridge is not None and hasattr(self._bridge, "create_article"):
+                frontmatter = {
+                    "source_url": url,
+                    "source_type": "web-clip",
+                    "description": extracted.get("description"),
+                }
+                self._bridge.create_article(slug, text, frontmatter=frontmatter)
+            result["slug"] = slug
+        except Exception as exc:
+            result["error"] = f"Storage failed: {exc}"
+            return result
+
+        self._compile_queue.append(slug)
+        result["status"] = "ok"
+        return result
+
+    def ingest_selection(self, text: str, url: str = "", title: str = "") -> dict:
+        """Ingest a user-selected text fragment (e.g. from browser clipper).
+
+        Returns the same result dict shape as :meth:`ingest_url`.
+        """
+        result: dict[str, Any] = {
+            "url": url,
+            "slug": None,
+            "status": "error",
+            "title": None,
+            "metadata": None,
+            "error": None,
+        }
+
+        if not text.strip():
+            result["error"] = "Empty selection"
+            return result
+
+        title = title or _slug_from_url(url) or "untitled-selection"
+        result["title"] = title
+        slug = _slugify(title)
+
+        try:
+            if self._bridge is not None and hasattr(self._bridge, "create_article"):
+                frontmatter = {
+                    "source_url": url,
+                    "source_type": "web-selection",
+                }
+                self._bridge.create_article(slug, text, frontmatter=frontmatter)
+            result["slug"] = slug
+        except Exception as exc:
+            result["error"] = f"Storage failed: {exc}"
+            return result
+
+        self._compile_queue.append(slug)
+        result["status"] = "ok"
+        return result
+
+    def ingest_search(self, query: str, max_results: int = 5) -> list[dict]:
+        """Search the web, fetch top results, and ingest them.
+
+        Uses a simple web search approach. Returns a list of ingest result
+        dicts (same shape as :meth:`ingest_url`).
+        """
+        results: list[dict] = []
+
+        # Use DuckDuckGo HTML search (no API key required)
+        try:
+            urls = self._search_web(query, max_results=max_results)
+        except Exception as exc:
+            log.error("ingest_search: web search failed: %s", exc)
+            return [{"url": "", "slug": None, "status": "error",
+                     "title": None, "metadata": None,
+                     "error": f"Search failed: {exc}"}]
+
+        for url in urls:
+            result = self.ingest_url(url)
+            results.append(result)
+
+        return results
+
+    # -- web fetch helpers --------------------------------------------------
+
+    @staticmethod
+    def _fetch_url(url: str) -> str:
+        """Fetch URL content via httpx. Returns HTML string."""
+        with httpx.Client(
+            timeout=_FETCH_TIMEOUT,
+            follow_redirects=True,
+            headers={"User-Agent": _USER_AGENT},
+        ) as client:
+            response = client.get(url)
+            response.raise_for_status()
+            return response.text
+
+    @staticmethod
+    def _search_web(query: str, max_results: int = 5) -> list[str]:
+        """Search the web via DuckDuckGo HTML and return result URLs.
+
+        This is a lightweight approach that does not require an API key.
+        For production use, consider integrating a dedicated search API.
+        """
+        search_url = "https://html.duckduckgo.com/html/"
+        with httpx.Client(
+            timeout=_FETCH_TIMEOUT,
+            follow_redirects=True,
+            headers={"User-Agent": _USER_AGENT},
+        ) as client:
+            resp = client.post(search_url, data={"q": query})
+            resp.raise_for_status()
+
+        soup = BeautifulSoup(resp.text, "lxml")
+        urls: list[str] = []
+        for link in soup.select("a.result__a"):
+            href = link.get("href", "")
+            if href and href.startswith("http"):
+                urls.append(href)
+                if len(urls) >= max_results:
+                    break
+        return urls
+
     # -- static helpers -----------------------------------------------------
 
     @staticmethod
@@ -279,3 +525,150 @@ class IngestPipeline:
                 if fp.is_file() and fp.suffix.lower() in _ALL_SUPPORTED:
                     files.append(fp)
         return files
+
+
+# ---------------------------------------------------------------------------
+# HTML content extraction (module-level helpers)
+# ---------------------------------------------------------------------------
+
+
+def extract_html_content(html: str, source_url: str = "") -> dict[str, Any]:
+    """Extract clean text and metadata from an HTML document.
+
+    Returns::
+
+        {
+            "title": str | None,
+            "description": str | None,
+            "canonical_url": str | None,
+            "publish_date": str | None,
+            "text": str,
+        }
+    """
+    soup = BeautifulSoup(html, "lxml")
+
+    # -- Extract metadata before stripping tags ----------------------------
+    title = _extract_title(soup)
+    description = _extract_meta(soup, "description")
+    canonical_url = _extract_canonical(soup) or source_url
+    publish_date = _extract_publish_date(soup)
+
+    # -- Strip unwanted tags -----------------------------------------------
+    for tag_name in _STRIP_TAGS:
+        for tag in soup.find_all(tag_name):
+            tag.decompose()
+
+    # Strip HTML comments
+    for comment in soup.find_all(string=lambda t: isinstance(t, Comment)):
+        comment.extract()
+
+    # -- Extract clean text ------------------------------------------------
+    text = soup.get_text(separator="\n", strip=True)
+    # Collapse multiple blank lines
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    return {
+        "title": title,
+        "description": description,
+        "canonical_url": canonical_url,
+        "publish_date": publish_date,
+        "text": text.strip(),
+    }
+
+
+def _extract_title(soup: BeautifulSoup) -> str | None:
+    """Extract page title from <title> or og:title."""
+    # Try <title> first
+    title_tag = soup.find("title")
+    if title_tag and title_tag.string:
+        return title_tag.string.strip()
+
+    # Fallback: og:title
+    og = soup.find("meta", attrs={"property": "og:title"})
+    if og and og.get("content"):
+        return og["content"].strip()
+
+    # Fallback: first <h1>
+    h1 = soup.find("h1")
+    if h1:
+        return h1.get_text(strip=True)
+
+    return None
+
+
+def _extract_meta(soup: BeautifulSoup, name: str) -> str | None:
+    """Extract a <meta name=...> content value."""
+    tag = soup.find("meta", attrs={"name": name})
+    if tag and tag.get("content"):
+        return tag["content"].strip()
+    # Also check property (og:description)
+    tag = soup.find("meta", attrs={"property": f"og:{name}"})
+    if tag and tag.get("content"):
+        return tag["content"].strip()
+    return None
+
+
+def _extract_canonical(soup: BeautifulSoup) -> str | None:
+    """Extract canonical URL from <link rel=canonical>."""
+    link = soup.find("link", attrs={"rel": "canonical"})
+    if link and link.get("href"):
+        return link["href"].strip()
+    return None
+
+
+def _extract_publish_date(soup: BeautifulSoup) -> str | None:
+    """Extract publish date from meta tags or JSON-LD."""
+    # Try meta tags first
+    for attr in ("article:published_time", "datePublished", "date"):
+        tag = soup.find("meta", attrs={"property": attr}) or soup.find(
+            "meta", attrs={"name": attr}
+        )
+        if tag and tag.get("content"):
+            return tag["content"].strip()
+
+    # Try JSON-LD
+    for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        try:
+            data = json.loads(script.string or "")
+            if isinstance(data, dict):
+                for key in ("datePublished", "dateCreated", "dateModified"):
+                    if key in data:
+                        return str(data[key])
+            elif isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict):
+                        for key in ("datePublished", "dateCreated"):
+                            if key in item:
+                                return str(item[key])
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+    return None
+
+
+def _slugify(text: str) -> str:
+    """Convert text to a URL-safe slug."""
+    slug = text.lower().strip()
+    slug = re.sub(r"[^\w\s-]", "", slug)
+    slug = re.sub(r"[\s_]+", "-", slug)
+    slug = re.sub(r"-+", "-", slug)
+    slug = slug.strip("-")
+    return slug[:80] or "untitled"
+
+
+def _slug_from_url(url: str) -> str:
+    """Generate a readable slug from a URL path."""
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    path = parsed.path.strip("/")
+    if path:
+        # Use the last path segment
+        segment = path.split("/")[-1]
+        # Remove file extensions
+        segment = re.sub(r"\.\w+$", "", segment)
+        if segment:
+            return _slugify(segment)
+    # Fall back to hostname
+    hostname = parsed.hostname or ""
+    return _slugify(hostname) or "web-clip"

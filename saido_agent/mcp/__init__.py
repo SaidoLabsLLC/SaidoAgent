@@ -9,3 +9,4 @@ from .config import (                                                       # no
     list_config_files,
 )
 from .tools import initialize_mcp, reload_mcp, refresh_server              # noqa: F401
+from .ingest_bridge import MCPIngestBridge, load_recipe, list_recipes       # noqa: F401

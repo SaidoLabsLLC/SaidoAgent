@@ -1,0 +1,9 @@
+{
+    "name": "ast-grep",
+    "description": "Structural code analysis across codebase and knowledge store",
+    "install": "uvx --from git+https://github.com/ast-grep/ast-grep-mcp",
+    "command": ["uvx", "--from", "ast-grep-mcp", "ast-grep-mcp"],
+    "tools": ["find_code", "find_code_by_rule", "dump_syntax_tree", "test_match_code_rule"],
+    "auto_ingest": false,
+    "notes": "Upgrade from Phase 1 native ast-grep -- enables iterative rule development"
+}

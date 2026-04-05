@@ -1,0 +1,7 @@
+{
+    "name": "gmail",
+    "description": "Read emails and ingest as knowledge articles",
+    "tools": ["search_messages", "read_message"],
+    "auto_ingest": true,
+    "ingest_tools": ["read_message"]
+}

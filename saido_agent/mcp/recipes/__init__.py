@@ -1,0 +1,1 @@
+# MCP server recipe templates.

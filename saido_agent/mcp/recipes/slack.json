@@ -1,0 +1,7 @@
+{
+    "name": "slack",
+    "description": "Read Slack messages and threads",
+    "tools": ["read_channel", "read_thread"],
+    "auto_ingest": true,
+    "ingest_tools": ["read_thread"]
+}
