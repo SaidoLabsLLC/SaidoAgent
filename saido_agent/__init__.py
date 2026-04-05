@@ -60,12 +60,15 @@ class SaidoAgent:
         api_key: Optional[str] = None,
         system_prompt_extension: str = "",
         routing_config: Optional[str] = None,
+        voice_config: Optional[Any] = None,
     ) -> None:
         self._knowledge_dir = str(Path(knowledge_dir).resolve())
         self._llm_provider = llm_provider
         self._model = model
         self._api_key = api_key
         self._system_prompt_extension = system_prompt_extension
+        self._voice_config = voice_config
+        self._voice_pipeline: Optional[Any] = None
 
         # -- Internal components (lazy-initialized where possible) --
 
@@ -385,6 +388,32 @@ class SaidoAgent:
     def cost_tracker(self) -> Any:
         """Access the underlying CostTracker (advanced use)."""
         return self._cost_tracker
+
+    # ------------------------------------------------------------------
+    # Public API -- Voice Pipeline
+    # ------------------------------------------------------------------
+
+    @property
+    def voice_pipeline(self) -> Any:
+        """Access the voice pipeline (lazy-initialized).
+
+        Returns a ``VoicePipeline`` instance configured from the
+        ``voice_config`` parameter passed at construction time. If no
+        voice config was provided, a default ``VoicePipeline`` is created.
+        """
+        if self._voice_pipeline is None:
+            from saido_agent.voice.pipeline import VoicePipeline
+
+            self._voice_pipeline = VoicePipeline(
+                agent=self,
+                config=self._voice_config,
+            )
+        return self._voice_pipeline
+
+    @property
+    def voice_config(self) -> Any:
+        """The voice configuration (if set)."""
+        return self._voice_config
 
 
 __all__ = ["SaidoAgent", "SaidoConfig", "__version__"]

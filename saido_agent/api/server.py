@@ -104,8 +104,10 @@ async def health_check():
 # ---------------------------------------------------------------------------
 
 from saido_agent.api.routes import v1_router  # noqa: E402
+from saido_agent.api.websocket import ws_router  # noqa: E402
 
 app.include_router(v1_router)
+app.include_router(ws_router)
 
 
 # ---------------------------------------------------------------------------

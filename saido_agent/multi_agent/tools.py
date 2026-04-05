@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from saido_agent.core.tool_registry import ToolDef, register_tool
 from .subagent import SubAgentManager, get_agent_definition, load_agent_definitions
+from .resources import AgentResourceLimits
 
 
 _agent_manager: SubAgentManager | None = None
@@ -45,7 +46,20 @@ def _agent_tool(params: dict, config: dict) -> str:
         if task.worktree_branch:
             header += f", branch: {task.worktree_branch}"
         header += "]"
-        return f"{header}\n\n{result}"
+        # Append resource usage summary if available
+        resource_footer = ""
+        if task.resource_summary:
+            rs = task.resource_summary
+            resource_footer = (
+                f"\n\n[Resources: {rs.get('tokens_used', 0)} tokens, "
+                f"{rs.get('turns_used', 0)} turns, "
+                f"{rs.get('tool_calls_used', 0)} tool calls, "
+                f"{rs.get('elapsed_seconds', 0)}s elapsed"
+            )
+            if rs.get("exceeded_limit"):
+                resource_footer += f" | EXCEEDED: {rs['exceeded_limit']}"
+            resource_footer += "]"
+        return f"{header}\n\n{result}{resource_footer}"
     else:
         info_parts = [f"Task ID: {task.id}", f"Name: {task.name}", f"Status: {task.status}"]
         if subagent_type:

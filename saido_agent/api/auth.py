@@ -2,9 +2,11 @@
 
 Provides:
   - API key management (create, verify, revoke) with SHA-256 hashing
-  - JWT session tokens for stateless auth
+  - JWT session tokens for stateless auth (tenant-level and user-level)
   - Per-key rate limiting with in-memory sliding window
   - FastAPI dependency ``get_current_tenant`` for route injection
+  - ``AuthContext`` dataclass carrying user_id, team_id, and role
+  - ``get_auth_context`` dependency for RBAC-aware routes
 """
 
 from __future__ import annotations
@@ -15,10 +17,11 @@ import logging
 import os
 import secrets
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-import jwt
+import jwt as pyjwt
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import APIKeyHeader
 
@@ -171,19 +174,54 @@ def create_jwt_token(tenant_id: str) -> str:
         "iat": time.time(),
         "exp": time.time() + _JWT_EXPIRY_SECONDS,
     }
-    return jwt.encode(payload, secret, algorithm=_JWT_ALGORITHM)
+    return pyjwt.encode(payload, secret, algorithm=_JWT_ALGORITHM)
 
 
-def verify_jwt_token(token: str) -> Optional[str]:
-    """Verify a JWT token. Returns ``tenant_id`` or ``None``."""
+def create_user_jwt_token(
+    user_id: str,
+    team_id: str,
+    role: str,
+) -> str:
+    """Create a JWT token for an authenticated user with team context.
+
+    The token includes user_id, team_id, and role so downstream
+    dependencies can enforce RBAC without a database round-trip.
+    """
+    secret = _get_jwt_secret()
+    payload = {
+        "user_id": user_id,
+        "team_id": team_id,
+        "role": role,
+        "iat": time.time(),
+        "exp": time.time() + _JWT_EXPIRY_SECONDS,
+    }
+    return pyjwt.encode(payload, secret, algorithm=_JWT_ALGORITHM)
+
+
+def verify_jwt_token(token: str) -> Optional[dict | str]:
+    """Verify a JWT token.
+
+    Returns:
+      - A dict with ``user_id``, ``team_id``, ``role`` for user tokens
+      - A string ``tenant_id`` for legacy tenant tokens
+      - ``None`` on failure
+    """
     secret = _get_jwt_secret()
     try:
-        payload = jwt.decode(token, secret, algorithms=[_JWT_ALGORITHM])
+        payload = pyjwt.decode(token, secret, algorithms=[_JWT_ALGORITHM])
+        # User-level token (Phase 3)
+        if "user_id" in payload:
+            return {
+                "user_id": payload["user_id"],
+                "team_id": payload.get("team_id", ""),
+                "role": payload.get("role", "viewer"),
+            }
+        # Legacy tenant token (Phase 2)
         return payload.get("tenant_id")
-    except jwt.ExpiredSignatureError:
+    except pyjwt.ExpiredSignatureError:
         logger.debug("JWT token expired")
         return None
-    except jwt.InvalidTokenError:
+    except pyjwt.InvalidTokenError:
         logger.debug("Invalid JWT token")
         return None
 
@@ -268,11 +306,16 @@ async def get_current_tenant(
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
             token = auth_header[7:]
-            tenant_id = verify_jwt_token(token)
-            if tenant_id is None:
+            payload = verify_jwt_token(token)
+            if payload is None:
                 raise HTTPException(
                     status_code=401, detail="Invalid or expired JWT token"
                 )
+            # Handle both user-level dict and legacy string payloads
+            if isinstance(payload, dict):
+                tenant_id = payload.get("team_id") or payload.get("user_id", "")
+            else:
+                tenant_id = payload
 
     if tenant_id is None:
         raise HTTPException(
@@ -288,3 +331,110 @@ async def get_current_tenant(
         )
 
     return tenant_id
+
+
+# ---------------------------------------------------------------------------
+# AuthContext — RBAC-aware authentication context (Phase 3)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AuthContext:
+    """Authentication context returned by ``get_auth_context``.
+
+    For user-level tokens: all fields populated.
+    For legacy API-key/tenant tokens: ``tenant_id`` set, others may be None.
+    """
+
+    tenant_id: str
+    user_id: Optional[str] = None
+    team_id: Optional[str] = None
+    role: Optional["_Role"] = None
+
+    @property
+    def is_user_auth(self) -> bool:
+        """True if this context was created from a user JWT."""
+        return self.user_id is not None
+
+
+# Import Role lazily to avoid circular imports
+_Role = None
+
+
+def _get_role_enum():
+    global _Role
+    if _Role is None:
+        from saido_agent.api.rbac import Role
+        _Role = Role
+    return _Role
+
+
+async def get_auth_context(
+    request: Request,
+    api_key: Optional[str] = Depends(_api_key_header),
+) -> AuthContext:
+    """FastAPI dependency: extract authentication context with RBAC info.
+
+    Works with both legacy API keys (Phase 2) and user JWT tokens (Phase 3).
+    Returns an ``AuthContext`` with tenant_id, user_id, team_id, and role.
+
+    Raises ``HTTPException(401)`` on failure.
+    Raises ``HTTPException(429)`` if rate-limited.
+    """
+    Role = _get_role_enum()
+    tenant_id: Optional[str] = None
+    user_id: Optional[str] = None
+    team_id: Optional[str] = None
+    role: Optional[Role] = None
+    rate_limit = DEFAULT_RATE_LIMIT
+
+    # 1. Try API key
+    if api_key:
+        entry = verify_api_key(api_key)
+        if entry is None:
+            raise HTTPException(status_code=401, detail="Invalid API key")
+        tenant_id = entry["tenant_id"]
+        rate_limit = entry.get("rate_limit", DEFAULT_RATE_LIMIT)
+
+    # 2. Try JWT bearer token
+    if tenant_id is None:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            payload = verify_jwt_token(token)
+            if payload is None:
+                raise HTTPException(
+                    status_code=401, detail="Invalid or expired JWT token"
+                )
+            if isinstance(payload, dict):
+                # User-level token
+                user_id = payload["user_id"]
+                team_id = payload.get("team_id", "")
+                role_str = payload.get("role", "viewer")
+                try:
+                    role = Role(role_str)
+                except ValueError:
+                    role = Role.VIEWER
+                tenant_id = team_id  # Use team_id as tenant scope
+            else:
+                # Legacy tenant token
+                tenant_id = payload
+
+    if tenant_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing authentication. Provide X-API-Key header or Bearer token.",
+        )
+
+    # Rate limit check
+    if not check_rate_limit(tenant_id, rate_limit):
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded. Please try again later.",
+        )
+
+    return AuthContext(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        team_id=team_id,
+        role=role,
+    )

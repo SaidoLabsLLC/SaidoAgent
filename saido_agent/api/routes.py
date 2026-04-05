@@ -19,12 +19,16 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from saido_agent.api.auth import (
+    AuthContext,
     create_api_key,
     create_jwt_token,
+    create_user_jwt_token,
+    get_auth_context,
     get_current_tenant,
     get_tenant_knowledge_dir,
     verify_api_key,
 )
+from saido_agent.api.rbac import Role, require_permission
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +60,14 @@ class ClipRequest(BaseModel):
     html: Optional[str] = None
     selection: Optional[str] = None
     title: Optional[str] = None
+
+
+class VoiceRequest(BaseModel):
+    """Request body for POST /v1/voice (JSON mode with base64 audio)."""
+
+    audio_base64: Optional[str] = None
+    context: Optional[dict] = None
+    stream: bool = False
 
 
 class AgentRequest(BaseModel):
@@ -141,6 +153,14 @@ class AgentResponse(BaseModel):
     tokens_used: int = 0
 
 
+class VoiceResponse(BaseModel):
+    transcript: str
+    answer: str
+    audio_base64: str = ""
+    citations: list[dict] = []
+    latency_ms: dict = {}
+
+
 class TokenResponse(BaseModel):
     token: str
     tenant_id: str
@@ -159,6 +179,65 @@ class KeyCreatedResponse(BaseModel):
     api_key: str
     tenant_id: str
     message: str = "Store this key securely. It will not be shown again."
+
+
+# -- RBAC models (Phase 3) --------------------------------------------------
+
+class RegisterRequest(BaseModel):
+    """Request body for POST /v1/auth/register."""
+    email: str
+    name: str
+    password: str
+
+
+class LoginRequest(BaseModel):
+    """Request body for POST /v1/auth/login."""
+    email: str
+    password: str
+    team_id: Optional[str] = None
+
+
+class RegisterResponse(BaseModel):
+    user_id: str
+    email: str
+    name: str
+
+
+class LoginResponse(BaseModel):
+    token: str
+    user_id: str
+    email: str
+    team_id: str = ""
+    role: str = ""
+    expires_in: int = 3600
+
+
+class CreateTeamRequest(BaseModel):
+    name: str
+
+
+class TeamResponse(BaseModel):
+    id: str
+    name: str
+    owner_id: str
+    role: Optional[str] = None
+
+
+class AddMemberRequest(BaseModel):
+    user_id: str
+    role: str = "viewer"
+
+
+class UpdateRoleRequest(BaseModel):
+    role: str
+
+
+class MemberResponse(BaseModel):
+    user_id: str
+    email: str = ""
+    name: str = ""
+    role: str
+    team_id: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -196,10 +275,221 @@ async def create_token(body: TokenRequest):
 
 
 @v1_router.post("/auth/keys", response_model=KeyCreatedResponse, tags=["auth"])
-async def create_key(body: CreateKeyRequest, tenant: dict = Depends(get_current_tenant)):
+async def create_key(body: CreateKeyRequest, tenant: str = Depends(get_current_tenant)):
     """Create a new API key for a tenant. Requires authentication (admin-only)."""
     key = create_api_key(body.tenant_id, rate_limit=body.rate_limit)
     return KeyCreatedResponse(api_key=key, tenant_id=body.tenant_id)
+
+
+# -- User auth (Phase 3) ---------------------------------------------------
+
+@v1_router.post("/auth/register", response_model=RegisterResponse, tags=["auth"])
+async def register_user(body: RegisterRequest):
+    """Register a new user account."""
+    from saido_agent.api.users import create_user
+
+    try:
+        user = create_user(body.email, body.name, body.password)
+        return RegisterResponse(
+            user_id=user["id"], email=user["email"], name=user["name"]
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@v1_router.post("/auth/login", response_model=LoginResponse, tags=["auth"])
+async def login_user(body: LoginRequest):
+    """Authenticate and receive a JWT token.
+
+    If ``team_id`` is provided, the token is scoped to that team and
+    includes the user's role. Otherwise, a token with no team scope is
+    returned (the user must switch team context later).
+    """
+    from saido_agent.api.users import authenticate_user, get_member_role, list_user_teams
+
+    user = authenticate_user(body.email, body.password)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    team_id = body.team_id or ""
+    role = ""
+
+    if team_id:
+        member_role = get_member_role(team_id, user["id"])
+        if member_role is None:
+            raise HTTPException(
+                status_code=403, detail="You are not a member of this team"
+            )
+        role = member_role
+    else:
+        # Auto-select first team if user has one
+        teams = list_user_teams(user["id"])
+        if teams:
+            team_id = teams[0]["id"]
+            role = teams[0]["role"]
+
+    token = create_user_jwt_token(user["id"], team_id, role)
+    return LoginResponse(
+        token=token,
+        user_id=user["id"],
+        email=user["email"],
+        team_id=team_id,
+        role=role,
+    )
+
+
+# -- Teams (Phase 3) -------------------------------------------------------
+
+@v1_router.post("/teams", response_model=TeamResponse, tags=["teams"])
+async def create_team_endpoint(
+    body: CreateTeamRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+):
+    """Create a new team. The authenticated user becomes the owner/admin."""
+    from saido_agent.api.users import create_team
+
+    if not ctx.user_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Team creation requires user-level authentication (login first)",
+        )
+
+    team = create_team(body.name, ctx.user_id)
+    return TeamResponse(id=team["id"], name=team["name"], owner_id=team["owner_id"], role="admin")
+
+
+@v1_router.get("/teams", response_model=list[TeamResponse], tags=["teams"])
+async def list_teams_endpoint(
+    ctx: AuthContext = Depends(get_auth_context),
+):
+    """List all teams the authenticated user belongs to."""
+    from saido_agent.api.users import list_user_teams
+
+    if not ctx.user_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Listing teams requires user-level authentication",
+        )
+
+    teams = list_user_teams(ctx.user_id)
+    return [
+        TeamResponse(id=t["id"], name=t["name"], owner_id=t["owner_id"], role=t["role"])
+        for t in teams
+    ]
+
+
+@v1_router.post(
+    "/teams/{team_id}/members",
+    response_model=MemberResponse,
+    tags=["teams"],
+)
+async def add_team_member(
+    team_id: str,
+    body: AddMemberRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+):
+    """Add a member to a team. Requires admin role in the team."""
+    from saido_agent.api.users import add_member, get_member_role, get_user
+
+    # Verify caller is admin in this team
+    if ctx.user_id:
+        caller_role = get_member_role(team_id, ctx.user_id)
+        if caller_role != "admin":
+            raise HTTPException(
+                status_code=403, detail="Only team admins can add members"
+            )
+
+    # Validate role
+    try:
+        Role(body.role)
+    except ValueError:
+        raise HTTPException(
+            status_code=422, detail=f"Invalid role '{body.role}'. Must be admin, editor, or viewer."
+        )
+
+    try:
+        result = add_member(team_id, body.user_id, body.role)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    user = get_user(body.user_id)
+    return MemberResponse(
+        user_id=body.user_id,
+        email=user["email"] if user else "",
+        name=user["name"] if user else "",
+        role=body.role,
+        team_id=team_id,
+    )
+
+
+@v1_router.patch(
+    "/teams/{team_id}/members/{user_id}",
+    response_model=MemberResponse,
+    tags=["teams"],
+)
+async def update_team_member_role(
+    team_id: str,
+    user_id: str,
+    body: UpdateRoleRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+):
+    """Update a team member's role. Requires admin role."""
+    from saido_agent.api.users import get_member_role, get_user, update_member_role
+
+    # Verify caller is admin
+    if ctx.user_id:
+        caller_role = get_member_role(team_id, ctx.user_id)
+        if caller_role != "admin":
+            raise HTTPException(
+                status_code=403, detail="Only team admins can update roles"
+            )
+
+    try:
+        Role(body.role)
+    except ValueError:
+        raise HTTPException(
+            status_code=422, detail=f"Invalid role '{body.role}'. Must be admin, editor, or viewer."
+        )
+
+    updated = update_member_role(team_id, user_id, body.role)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Member not found in team")
+
+    user = get_user(user_id)
+    return MemberResponse(
+        user_id=user_id,
+        email=user["email"] if user else "",
+        name=user["name"] if user else "",
+        role=body.role,
+        team_id=team_id,
+    )
+
+
+@v1_router.delete(
+    "/teams/{team_id}/members/{user_id}",
+    tags=["teams"],
+)
+async def remove_team_member(
+    team_id: str,
+    user_id: str,
+    ctx: AuthContext = Depends(get_auth_context),
+):
+    """Remove a member from a team. Requires admin role."""
+    from saido_agent.api.users import get_member_role, remove_member
+
+    # Verify caller is admin
+    if ctx.user_id:
+        caller_role = get_member_role(team_id, ctx.user_id)
+        if caller_role != "admin":
+            raise HTTPException(
+                status_code=403, detail="Only team admins can remove members"
+            )
+
+    removed = remove_member(team_id, user_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Member not found in team")
+
+    return {"status": "removed", "user_id": user_id, "team_id": team_id}
 
 
 # -- Ingest ----------------------------------------------------------------
@@ -559,3 +849,67 @@ async def run_agent(
         tool_calls=result.tool_calls,
         tokens_used=result.tokens_used,
     )
+
+
+# -- Voice -----------------------------------------------------------------
+
+@v1_router.post("/voice", response_model=VoiceResponse, tags=["voice"])
+async def voice_process(
+    request: Request,
+    body: VoiceRequest = None,
+    tenant_id: str = Depends(get_current_tenant),
+):
+    """Process voice input and return voice output.
+
+    Accepts audio as:
+      - **JSON body**: base64-encoded audio in ``audio_base64`` field
+      - **Binary body**: raw audio bytes (Content-Type: application/octet-stream)
+
+    Returns the transcript, agent answer, synthesized audio (base64), and
+    latency measurements for each pipeline stage.
+    """
+    import base64
+
+    agent = _get_tenant_agent(tenant_id)
+
+    # Resolve audio bytes from request
+    content_type = request.headers.get("content-type", "")
+
+    if "application/octet-stream" in content_type:
+        audio_bytes = await request.body()
+        context = None
+    elif body is not None and body.audio_base64:
+        try:
+            audio_bytes = base64.b64decode(body.audio_base64)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid base64 audio data")
+        context = body.context
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide audio as base64 in JSON body or raw bytes with "
+                   "Content-Type: application/octet-stream",
+        )
+
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="Empty audio data")
+
+    # Process through voice pipeline
+    try:
+        pipeline = agent.voice_pipeline
+        result = await pipeline.process(audio_bytes, context=context)
+
+        audio_b64 = ""
+        if result.audio_out:
+            audio_b64 = base64.b64encode(result.audio_out).decode("ascii")
+
+        return VoiceResponse(
+            transcript=result.transcript,
+            answer=result.answer,
+            audio_base64=audio_b64,
+            citations=result.citations,
+            latency_ms=result.latency_ms,
+        )
+    except Exception as exc:
+        logger.exception("Voice pipeline failed")
+        raise HTTPException(status_code=500, detail=str(exc))
