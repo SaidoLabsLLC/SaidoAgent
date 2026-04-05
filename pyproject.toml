@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "saido-agent"
+version = "0.1.0"
+description = "Knowledge-compounding AI agent platform by Saido Labs LLC"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+authors = [{name = "Saido Labs LLC"}]
+
+dependencies = [
+    "anthropic>=0.40.0",
+    "openai>=1.30.0",
+    "httpx>=0.27.0",
+    "rich>=13.0.0",
+    "sounddevice",
+    "smartrag",
+]
+
+[project.scripts]
+saido-agent = "saido_agent.cli.repl:main"
+
+[tool.setuptools.packages.find]
+include = ["saido_agent*"]
