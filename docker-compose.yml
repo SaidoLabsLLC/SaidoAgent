@@ -1,0 +1,29 @@
+version: "3.9"
+
+services:
+  saido-agent:
+    build: .
+    container_name: saido-agent
+    ports:
+      - "8000:8000"
+    environment:
+      - SAIDO_KNOWLEDGE_DIR=/data/knowledge
+      - SAIDO_JWT_SECRET=dev-secret-change-me
+      - SAIDO_API_PORT=8000
+      - SAIDO_LOG_LEVEL=info
+    volumes:
+      - saido-data:/data
+      - saido-db:/home/saido/.saido_agent
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  saido-data:
+    driver: local
+  saido-db:
+    driver: local
