@@ -765,6 +765,12 @@ def _notebook_edit(
     cell_type: str = None,
     edit_mode: str = "replace",
 ) -> str:
+    # Path sandbox validation (NEW-1 fix)
+    try:
+        sandbox = get_sandbox()
+        notebook_path = sandbox.validate(notebook_path, "edit")
+    except PathSandboxError as e:
+        return f"Error: {e}"
     p = Path(notebook_path)
     if p.suffix != ".ipynb":
         return "Error: file must be a Jupyter notebook (.ipynb)"
@@ -965,16 +971,13 @@ def _ast_grep(pattern: str, path: str = None, language: str = None, rewrite: str
     Calls `sg --pattern <pattern> [--lang <language>] [--rewrite <rewrite>] <path>`
     and returns matches with file:line references.
     """
-    # Path sandboxing placeholder (CRIT-3 will add full validation)
+    # Path sandbox validation (NEW-1 fix — replaces placeholder)
     search_path = path or "."
-    resolved = Path(search_path).resolve()
-    cwd = Path.cwd().resolve()
-    # Basic containment check: path must be under cwd or be cwd itself
     try:
-        resolved.relative_to(cwd)
-    except ValueError:
-        if resolved != cwd:
-            return f"Error: path '{search_path}' is outside the working directory"
+        sandbox = get_sandbox()
+        search_path = sandbox.validate(search_path, "glob")
+    except PathSandboxError as e:
+        return f"Error: {e}"
 
     cmd = ["sg", "--pattern", pattern]
     if language:
@@ -982,7 +985,7 @@ def _ast_grep(pattern: str, path: str = None, language: str = None, rewrite: str
     if rewrite:
         # Dry-run only: show what would be rewritten without modifying files
         cmd += ["--rewrite", rewrite]
-    cmd.append(str(resolved))
+    cmd.append(str(search_path))
 
     try:
         r = subprocess.run(

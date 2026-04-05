@@ -44,7 +44,6 @@ DEFAULT_ALLOWED_MODULES: frozenset[str] = frozenset({
     "base64",
     "textwrap",
     "string",
-    "pathlib",
     "logging",
 })
 

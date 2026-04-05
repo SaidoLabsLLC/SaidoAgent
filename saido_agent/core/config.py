@@ -105,7 +105,15 @@ def _get_fernet() -> Fernet:
     passphrase = os.environ.get("SAIDO_AGENT_KEY_PASSPHRASE")
     if passphrase:
         import hashlib, base64
-        dk = hashlib.pbkdf2_hmac("sha256", passphrase.encode(), b"saido_agent_salt", 100_000)
+        # Per-installation random salt (NEW-3 fix — replaces static salt)
+        salt_path = Path(CONFIG_DIR) / "key_salt.bin"
+        if salt_path.exists():
+            salt = salt_path.read_bytes()
+        else:
+            salt = os.urandom(32)
+            salt_path.parent.mkdir(parents=True, exist_ok=True)
+            salt_path.write_bytes(salt)
+        dk = hashlib.pbkdf2_hmac("sha256", passphrase.encode(), salt, 100_000)
         return Fernet(base64.urlsafe_b64encode(dk))
 
     # Try to retrieve or generate a machine key stored in keyring
