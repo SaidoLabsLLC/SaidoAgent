@@ -85,8 +85,15 @@ def require_permission(permission: str):
         ctx=Depends(_get_auth_context_dep()),
     ):
         if ctx.role is None:
-            # Legacy API-key auth with no user/role -- treat as admin
-            # for backward compatibility with Phase 2 keys.
+            # Legacy API-key auth with no user/role -- default to viewer
+            # for security. Admin operations require user-level auth.
+            effective_role = Role.VIEWER
+            if not check_permission(effective_role, permission):
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Permission denied: legacy API keys have viewer-level access. "
+                    f"Use user login for '{permission}'.",
+                )
             return ctx
         if not check_permission(ctx.role, permission):
             raise HTTPException(

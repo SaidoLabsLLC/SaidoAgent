@@ -15,10 +15,12 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from saido_agent.api.auth import get_tenant_knowledge_dir
 
@@ -89,6 +91,21 @@ app.add_middleware(
 )
 
 
+# Security headers middleware (P3-MED-1)
+@app.middleware("http")
+async def security_headers(request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; font-src 'self'; connect-src 'self'"
+    )
+    return response
+
+
 # ---------------------------------------------------------------------------
 # Health check (no auth required)
 # ---------------------------------------------------------------------------
@@ -108,6 +125,16 @@ from saido_agent.api.websocket import ws_router  # noqa: E402
 
 app.include_router(v1_router)
 app.include_router(ws_router)
+
+
+# ---------------------------------------------------------------------------
+# Serve frontend static files (production build)
+# ---------------------------------------------------------------------------
+
+_frontend_dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+if _frontend_dist.is_dir():
+    app.mount("/", StaticFiles(directory=str(_frontend_dist), html=True), name="frontend")
+    logger.info("Serving frontend from %s", _frontend_dist)
 
 
 # ---------------------------------------------------------------------------

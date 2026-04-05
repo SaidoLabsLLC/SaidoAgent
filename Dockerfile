@@ -3,7 +3,20 @@
 # =============================================================================
 
 # ---------------------------------------------------------------------------
-# Stage 1: Builder — install dependencies and build the wheel
+# Stage 1: Frontend — build the React UI
+# ---------------------------------------------------------------------------
+FROM node:20-slim AS frontend
+
+WORKDIR /frontend
+
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm ci --no-audit --no-fund 2>/dev/null || npm install --no-audit --no-fund
+
+COPY frontend/ ./
+RUN npm run build
+
+# ---------------------------------------------------------------------------
+# Stage 2: Builder — install Python dependencies and build the wheel
 # ---------------------------------------------------------------------------
 FROM python:3.11-slim AS builder
 
@@ -23,7 +36,7 @@ RUN python -m venv /opt/venv && \
     /opt/venv/bin/pip install --no-cache-dir .
 
 # ---------------------------------------------------------------------------
-# Stage 2: Runtime — minimal image with only what we need
+# Stage 3: Runtime — minimal image with only what we need
 # ---------------------------------------------------------------------------
 FROM python:3.11-slim AS runtime
 
@@ -45,6 +58,9 @@ COPY saido_agent/ saido_agent/
 
 # Copy migration files
 COPY saido_agent/api/migrations/ saido_agent/api/migrations/
+
+# Copy built frontend assets
+COPY --from=frontend /frontend/dist/ frontend/dist/
 
 # ---------------------------------------------------------------------------
 # Environment configuration

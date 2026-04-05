@@ -218,7 +218,7 @@ class TestUserRegistration:
     def test_register_email_case_insensitive(self, client):
         _register_user(client, email="BOB@EXAMPLE.COM")
         resp = client.post("/v1/auth/register", json={
-            "email": "bob@example.com", "name": "Bob2", "password": "P@ss2",
+            "email": "bob@example.com", "name": "Bob2", "password": "P@ssword2!",
         })
         assert resp.status_code == 409
 
@@ -652,7 +652,7 @@ class TestWebSocket:
         """WebSocket rejects user not in the requested team."""
         from starlette.websockets import WebSocketDisconnect
 
-        setup = self._create_user_in_team(client, "ws@test.com", "WSUser", "WsP@ss1")
+        setup = self._create_user_in_team(client, "ws@test.com", "WSUser", "WsP@ss1!")
         with pytest.raises((WebSocketDisconnect, Exception)):
             with client.websocket_connect(
                 f"/v1/ws?token={setup['token']}&team_id=nonexistent-team"
@@ -661,7 +661,7 @@ class TestWebSocket:
 
     def test_websocket_accepts_valid_member(self, client):
         """WebSocket accepts authenticated team member."""
-        setup = self._create_user_in_team(client, "ws2@test.com", "WSUser2", "WsP@ss2")
+        setup = self._create_user_in_team(client, "ws2@test.com", "WSUser2", "WsP@ss2!")
 
         with client.websocket_connect(
             f"/v1/ws?token={setup['token']}&team_id={setup['team_id']}"
@@ -677,7 +677,7 @@ class TestWebSocket:
         import asyncio
         from saido_agent.api.websocket import WSEvent, manager, EVENT_ARTICLE_CREATED
 
-        setup = self._create_user_in_team(client, "ws3@test.com", "WSUser3", "WsP@ss3")
+        setup = self._create_user_in_team(client, "ws3@test.com", "WSUser3", "WsP@ss3!")
 
         with client.websocket_connect(
             f"/v1/ws?token={setup['token']}&team_id={setup['team_id']}"

@@ -185,9 +185,9 @@ class KeyCreatedResponse(BaseModel):
 
 class RegisterRequest(BaseModel):
     """Request body for POST /v1/auth/register."""
-    email: str
-    name: str
-    password: str
+    email: str = Field(..., min_length=3)
+    name: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=8, description="Minimum 8 characters")
 
 
 class LoginRequest(BaseModel):
@@ -873,16 +873,22 @@ async def voice_process(
     agent = _get_tenant_agent(tenant_id)
 
     # Resolve audio bytes from request
+    # P3-HIGH-2: Enforce audio size limit (25MB max, ~10min at 16kHz mono)
+    MAX_AUDIO_BYTES = 25 * 1024 * 1024
     content_type = request.headers.get("content-type", "")
 
     if "application/octet-stream" in content_type:
         audio_bytes = await request.body()
+        if len(audio_bytes) > MAX_AUDIO_BYTES:
+            raise HTTPException(status_code=413, detail=f"Audio too large. Max 25MB, got {len(audio_bytes)} bytes.")
         context = None
     elif body is not None and body.audio_base64:
         try:
             audio_bytes = base64.b64decode(body.audio_base64)
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid base64 audio data")
+        if len(audio_bytes) > MAX_AUDIO_BYTES:
+            raise HTTPException(status_code=413, detail=f"Audio too large. Max 25MB, got {len(audio_bytes)} bytes.")
         context = body.context
     else:
         raise HTTPException(
@@ -913,3 +919,75 @@ async def voice_process(
     except Exception as exc:
         logger.exception("Voice pipeline failed")
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# -- Billing (Phase 3) ----------------------------------------------------
+
+class CheckoutRequest(BaseModel):
+    """Request body for POST /v1/billing/checkout."""
+    tier: str
+    success_url: str = "https://app.saido.ai/billing/success"
+    cancel_url: str = "https://app.saido.ai/billing/cancel"
+
+
+@v1_router.get("/billing/subscription", tags=["billing"])
+async def get_subscription(
+    tenant_id: str = Depends(get_current_tenant),
+):
+    """Return the current subscription details for the authenticated tenant."""
+    from saido_agent.api.billing import get_billing_manager
+
+    bm = get_billing_manager()
+    sub = bm.get_or_create_subscription(tenant_id)
+    return sub
+
+
+@v1_router.get("/billing/usage", tags=["billing"])
+async def get_usage(
+    tenant_id: str = Depends(get_current_tenant),
+):
+    """Return usage summary for the current billing period."""
+    from saido_agent.api.billing import get_billing_manager
+
+    bm = get_billing_manager()
+    return bm.get_usage_summary(tenant_id)
+
+
+@v1_router.post("/billing/checkout", tags=["billing"])
+async def create_checkout(
+    body: CheckoutRequest,
+    tenant_id: str = Depends(get_current_tenant),
+):
+    """Create a Stripe Checkout session for upgrading the subscription."""
+    from saido_agent.api.billing import get_billing_manager
+
+    bm = get_billing_manager()
+    try:
+        result = bm.create_checkout_session(
+            tenant_id, body.tier,
+            success_url=body.success_url,
+            cancel_url=body.cancel_url,
+        )
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@v1_router.post("/webhooks/stripe", tags=["billing"])
+async def stripe_webhook(request: Request):
+    """Handle Stripe webhook events.
+
+    This endpoint does NOT require authentication -- events are
+    verified by the Stripe webhook signature.
+    """
+    from saido_agent.api.billing import get_billing_manager
+
+    bm = get_billing_manager()
+    payload = await request.body()
+    signature = request.headers.get("Stripe-Signature", "")
+
+    try:
+        result = bm.handle_webhook(payload, signature)
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
