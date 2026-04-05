@@ -26,11 +26,14 @@ from saido_agent.voice.stt import (
     WebSpeechSTT,
 )
 from saido_agent.voice.tts import (
+    EdgeTTS,
     ElevenLabsTTS,
     KokoroTTS,
     OpenAITTS,
+    PiperTTS,
     TTSProvider,
     VoxtralTTS,
+    detect_best_tts,
 )
 from saido_agent.voice.vad import SileroVAD
 
@@ -184,8 +187,21 @@ class VoicePipeline:
         api_key = config.tts_api_key if config else None
         voice_id = config.tts_voice_id if config else None
 
-        if tts_name == "kokoro":
+        if tts_name == "auto":
+            try:
+                return detect_best_tts()
+            except RuntimeError:
+                logger.warning(
+                    "No TTS provider detected, falling back to KokoroTTS "
+                    "(will error on first synthesis if kokoro not installed)"
+                )
+                return KokoroTTS()
+        elif tts_name == "kokoro":
             return KokoroTTS()
+        elif tts_name == "piper":
+            return PiperTTS()
+        elif tts_name in ("edge-tts", "edge_tts", "edgetts"):
+            return EdgeTTS()
         elif tts_name == "voxtral":
             return VoxtralTTS()
         elif tts_name == "elevenlabs":
@@ -202,10 +218,13 @@ class VoicePipeline:
             return OpenAITTS(**kwargs)
         else:
             logger.warning(
-                "Unknown TTS provider '%s', falling back to KokoroTTS",
+                "Unknown TTS provider '%s', falling back to auto-detect",
                 tts_name,
             )
-            return KokoroTTS()
+            try:
+                return detect_best_tts()
+            except RuntimeError:
+                return KokoroTTS()
 
     # -- Properties -----------------------------------------------------------
 

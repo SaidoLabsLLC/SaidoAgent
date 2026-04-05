@@ -32,12 +32,15 @@ from saido_agent.voice.stt import (
     WebSpeechSTT,
 )
 from saido_agent.voice.tts import (
+    EdgeTTS,
     ElevenLabsTTS,
     KokoroTTS,
     OpenAITTS,
+    PiperTTS,
     TTSProvider,
     VoxtralTTS,
     _generate_silence,
+    detect_best_tts,
 )
 from saido_agent.voice.vad import SileroVAD
 
@@ -154,6 +157,13 @@ class TestVoiceConfig:
         assert config.activation == "voice-activity"
         assert config.edge_mode is True
         assert config.max_response_tokens == 50
+
+    def test_new_tts_providers_valid(self):
+        """Piper, edge-tts, and auto should be valid TTS provider names."""
+        for provider in ("piper", "edge-tts", "auto"):
+            config = VoiceConfig(tts=provider)
+            errors = config.validate()
+            assert errors == [], f"Expected no errors for tts='{provider}', got {errors}"
 
     def test_validate_valid_config(self):
         config = VoiceConfig()
@@ -368,6 +378,101 @@ class TestOpenAITTS:
                 tts.synthesize("Hello")
 
 
+class TestPiperTTS:
+    def test_graceful_error_when_not_installed(self):
+        tts = PiperTTS()
+        with patch.dict("sys.modules", {"piper": None, "piper.download": None}):
+            with pytest.raises(RuntimeError, match="piper-tts is not installed"):
+                tts.synthesize("Hello")
+
+    def test_model_lazy_loaded(self):
+        """Model should not be loaded at construction time."""
+        tts = PiperTTS()
+        assert tts._voice is None
+
+    def test_custom_model_name(self):
+        tts = PiperTTS(model="en_US-amy-low")
+        assert tts._model_name == "en_US-amy-low"
+
+    def test_synthesize_empty_returns_silence(self):
+        tts = PiperTTS()
+        result = tts.synthesize("")
+        assert isinstance(result, bytes)
+        assert len(result) > 0
+
+    def test_synthesize_whitespace_returns_silence(self):
+        tts = PiperTTS()
+        result = tts.synthesize("   ")
+        assert isinstance(result, bytes)
+        assert len(result) > 0
+
+
+class TestEdgeTTS:
+    def test_graceful_error_when_not_installed(self):
+        tts = EdgeTTS()
+        with patch.dict("sys.modules", {"edge_tts": None}):
+            with pytest.raises(RuntimeError, match="edge-tts is not installed"):
+                tts.synthesize("Hello")
+
+    def test_custom_voice(self):
+        tts = EdgeTTS(voice="en-US-GuyNeural")
+        assert tts._voice == "en-US-GuyNeural"
+
+    def test_default_voice(self):
+        tts = EdgeTTS()
+        assert tts._voice == "en-US-AriaNeural"
+
+    def test_synthesize_empty_returns_silence(self):
+        tts = EdgeTTS()
+        result = tts.synthesize("")
+        assert isinstance(result, bytes)
+        assert len(result) > 0
+
+    def test_synthesize_whitespace_returns_silence(self):
+        tts = EdgeTTS()
+        result = tts.synthesize("   ")
+        assert isinstance(result, bytes)
+        assert len(result) > 0
+
+
+class TestDetectBestTTS:
+    def test_detects_kokoro_first(self):
+        """Should prefer kokoro when available."""
+        mock_kokoro = MagicMock()
+        with patch.dict("sys.modules", {"kokoro": mock_kokoro}):
+            provider = detect_best_tts()
+            assert isinstance(provider, KokoroTTS)
+
+    def test_falls_back_to_piper(self):
+        """Should try piper when kokoro is unavailable."""
+        mock_piper = MagicMock()
+        with patch.dict(
+            "sys.modules",
+            {"kokoro": None, "piper": mock_piper},
+        ):
+            provider = detect_best_tts()
+            assert isinstance(provider, PiperTTS)
+
+    def test_falls_back_to_edge_tts(self):
+        """Should try edge-tts when kokoro and piper are unavailable."""
+        mock_edge = MagicMock()
+        with patch.dict(
+            "sys.modules",
+            {"kokoro": None, "piper": None, "edge_tts": mock_edge},
+        ):
+            provider = detect_best_tts()
+            assert isinstance(provider, EdgeTTS)
+
+    def test_raises_when_nothing_available(self):
+        """Should raise RuntimeError when no TTS library is installed."""
+        with patch.dict(
+            "sys.modules",
+            {"kokoro": None, "piper": None, "edge_tts": None},
+        ):
+            with pytest.raises(RuntimeError, match="No TTS provider available"):
+                detect_best_tts()
+
+
 class TestGenerateSilence:
     def test_silence_length(self):
         silence = _generate_silence(duration_ms=100, sample_rate=16000)
@@ -563,11 +668,34 @@ class TestVoicePipeline:
         pipeline = VoicePipeline(agent=agent, stt="nonexistent", tts=MockTTS())
         assert isinstance(pipeline.stt, FasterWhisperSTT)
 
-    def test_init_unknown_tts_falls_back(self):
-        """Unknown TTS name should fall back to KokoroTTS."""
+    def test_init_tts_piper(self):
+        """Pipeline should resolve 'piper' to PiperTTS."""
         agent = MockAgent()
-        pipeline = VoicePipeline(agent=agent, stt=MockSTT(), tts="nonexistent")
-        assert isinstance(pipeline.tts, KokoroTTS)
+        pipeline = VoicePipeline(agent=agent, stt=MockSTT(), tts="piper")
+        assert isinstance(pipeline.tts, PiperTTS)
+
+    def test_init_tts_edge(self):
+        """Pipeline should resolve 'edge-tts' to EdgeTTS."""
+        agent = MockAgent()
+        pipeline = VoicePipeline(agent=agent, stt=MockSTT(), tts="edge-tts")
+        assert isinstance(pipeline.tts, EdgeTTS)
+
+    def test_init_tts_auto(self):
+        """Pipeline should resolve 'auto' via detect_best_tts."""
+        agent = MockAgent()
+        mock_kokoro = MagicMock()
+        with patch.dict("sys.modules", {"kokoro": mock_kokoro}):
+            pipeline = VoicePipeline(agent=agent, stt=MockSTT(), tts="auto")
+            assert isinstance(pipeline.tts, KokoroTTS)
+
+    def test_init_unknown_tts_falls_back(self):
+        """Unknown TTS name should fall back via auto-detect."""
+        agent = MockAgent()
+        # With kokoro importable, auto-detect returns KokoroTTS
+        mock_kokoro = MagicMock()
+        with patch.dict("sys.modules", {"kokoro": mock_kokoro}):
+            pipeline = VoicePipeline(agent=agent, stt=MockSTT(), tts="nonexistent")
+            assert isinstance(pipeline.tts, (KokoroTTS, PiperTTS, EdgeTTS))
 
 
 # =============================================================================
@@ -663,9 +791,14 @@ class TestVoiceExports:
 
     def test_tts_providers_importable(self):
         from saido_agent.voice import (
-            TTSProvider, KokoroTTS, VoxtralTTS, ElevenLabsTTS, OpenAITTS,
+            TTSProvider, KokoroTTS, PiperTTS, EdgeTTS,
+            VoxtralTTS, ElevenLabsTTS, OpenAITTS,
+            detect_best_tts,
         )
         assert TTSProvider is not None
+        assert PiperTTS is not None
+        assert EdgeTTS is not None
+        assert detect_best_tts is not None
 
     def test_vad_importable(self):
         from saido_agent.voice import SileroVAD

@@ -28,6 +28,12 @@ dependencies = [
     "lxml>=5.0.0",
 ]
 
+[project.optional-dependencies]
+voice = ["kokoro>=0.7.0", "piper-tts>=1.4.0", "edge-tts>=7.0.0"]
+voice-kokoro = ["kokoro>=0.7.0"]
+voice-piper = ["piper-tts>=1.4.0"]
+voice-edge = ["edge-tts>=7.0.0"]
+
 [project.scripts]
 saido-agent = "saido_agent.cli.repl:main"
 

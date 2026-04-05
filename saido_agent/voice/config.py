@@ -17,8 +17,8 @@ class VoiceConfig:
     Attributes:
         stt: STT provider name. One of "faster-whisper", "deepgram",
              "web-speech".
-        tts: TTS provider name. One of "kokoro", "voxtral", "elevenlabs",
-             "openai".
+        tts: TTS provider name. One of "kokoro", "piper", "edge-tts",
+             "voxtral", "elevenlabs", "openai", or "auto" (detect best).
         activation: Activation mode. One of "push-to-talk", "voice-activity",
                     "wake-word".
         voice_style: Voice persona style hint passed to TTS providers.
@@ -58,7 +58,10 @@ class VoiceConfig:
         "web-speech",
     )
     VALID_TTS_PROVIDERS: tuple[str, ...] = (
+        "auto",
         "kokoro",
+        "piper",
+        "edge-tts",
         "voxtral",
         "elevenlabs",
         "openai",

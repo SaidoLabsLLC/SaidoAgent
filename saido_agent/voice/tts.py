@@ -3,12 +3,16 @@
 Provides a provider-based TTS architecture with lazy model loading:
 
   - ``KokoroTTS``     -- lightweight local TTS (82M params, default)
-  - ``VoxtralTTS``    -- higher quality local TTS (placeholder)
+  - ``PiperTTS``      -- ultra-lightweight edge/mobile TTS (few MB models)
+  - ``EdgeTTS``       -- free cloud TTS via Microsoft Edge (no API key)
   - ``ElevenLabsTTS`` -- cloud premium TTS via ElevenLabs API
   - ``OpenAITTS``     -- cloud TTS via OpenAI API
 
 All providers implement ``synthesize()`` for full audio generation and
 ``stream()`` for incremental chunk-based streaming.
+
+Auto-detection: ``detect_best_tts()`` tries kokoro -> piper -> edge-tts
+and returns the first available provider.
 """
 
 from __future__ import annotations
@@ -188,37 +192,237 @@ class KokoroTTS(TTSProvider):
 
 
 # =============================================================================
-# VoxtralTTS -- Higher quality local TTS (placeholder)
+# PiperTTS -- Ultra-lightweight edge/mobile TTS
+# =============================================================================
+
+
+class PiperTTS(TTSProvider):
+    """Ultra-lightweight local TTS using Piper. Edge/mobile optimized.
+
+    Uses ONNX-based VITS models that are only a few MB each. Models are
+    downloaded automatically on first use.
+
+    Install: ``pip install piper-tts``
+
+    Parameters:
+        model: Piper voice model name (e.g. "en_US-lessac-medium").
+        data_dir: Directory for downloaded model files. Defaults to
+                  ``~/.local/share/piper_tts``.
+    """
+
+    # Piper outputs at 22050 Hz by default (model-dependent)
+    _PIPER_SAMPLE_RATE = 22050
+
+    def __init__(
+        self,
+        model: str = "en_US-lessac-medium",
+        data_dir: Optional[str] = None,
+    ) -> None:
+        self._model_name = model
+        self._data_dir = data_dir or os.path.join(
+            os.path.expanduser("~"), ".local", "share", "piper_tts"
+        )
+        self._voice: Any = None
+
+    def _ensure_model(self) -> None:
+        if self._voice is not None:
+            return
+
+        try:
+            from piper import PiperVoice
+            from piper.download import ensure_voice_exists, find_voice, get_voices
+        except ImportError:
+            raise RuntimeError(
+                "piper-tts is not installed. "
+                "Install it with: pip install piper-tts"
+            )
+
+        try:
+            os.makedirs(self._data_dir, exist_ok=True)
+            voices_info = get_voices(self._data_dir, update_voices=True)
+            ensure_voice_exists(
+                self._model_name, self._data_dir, self._data_dir, voices_info
+            )
+            model_path, config_path = find_voice(self._model_name, self._data_dir)
+            self._voice = PiperVoice.load(model_path, config_path=config_path)
+            logger.info(
+                "PiperTTS model loaded (model=%s, dir=%s)",
+                self._model_name,
+                self._data_dir,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Failed to load Piper TTS model: {exc}")
+
+    def synthesize(self, text: str) -> bytes:
+        """Synthesize text to WAV audio bytes."""
+        if not text.strip():
+            return _generate_silence()
+
+        self._ensure_model()
+
+        try:
+            wav_buffer = io.BytesIO()
+            import wave
+
+            with wave.open(wav_buffer, "wb") as wav_file:
+                wav_file.setnchannels(CHANNELS)
+                wav_file.setsampwidth(BYTES_PER_SAMPLE)
+                wav_file.setframerate(self._PIPER_SAMPLE_RATE)
+                self._voice.synthesize(text, wav_file)
+
+            return wav_buffer.getvalue()
+
+        except Exception as exc:
+            logger.error("PiperTTS synthesis failed: %s", exc)
+            return _generate_silence()
+
+    async def stream(self, text: str) -> AsyncIterator[bytes]:
+        """Stream audio chunks sentence by sentence."""
+        if not text.strip():
+            yield _generate_silence()
+            return
+
+        self._ensure_model()
+
+        try:
+            import re
+
+            sentences = [
+                s.strip()
+                for s in re.split(r"(?<=[.!?])\s+", text.strip())
+                if s.strip()
+            ]
+            if not sentences:
+                sentences = [text]
+
+            for sentence in sentences:
+                wav_buffer = io.BytesIO()
+                import wave
+
+                with wave.open(wav_buffer, "wb") as wav_file:
+                    wav_file.setnchannels(CHANNELS)
+                    wav_file.setsampwidth(BYTES_PER_SAMPLE)
+                    wav_file.setframerate(self._PIPER_SAMPLE_RATE)
+                    self._voice.synthesize(sentence, wav_file)
+
+                yield wav_buffer.getvalue()
+
+        except Exception as exc:
+            logger.error("PiperTTS streaming failed: %s", exc)
+            yield _generate_silence()
+
+
+# =============================================================================
+# EdgeTTS -- Free cloud TTS via Microsoft Edge (no API key)
+# =============================================================================
+
+
+class EdgeTTS(TTSProvider):
+    """Free cloud TTS via Microsoft Edge. No API key needed.
+
+    Uses the ``edge-tts`` library to access Microsoft's TTS service.
+    Requires internet connectivity but has zero cost and no API key.
+
+    Install: ``pip install edge-tts``
+
+    Parameters:
+        voice: Microsoft Edge voice name (e.g. "en-US-AriaNeural").
+    """
+
+    def __init__(self, voice: str = "en-US-AriaNeural") -> None:
+        self._voice = voice
+
+    def synthesize(self, text: str) -> bytes:
+        """Synthesize text to MP3 audio bytes."""
+        if not text.strip():
+            return _generate_silence()
+
+        try:
+            import edge_tts
+        except ImportError:
+            raise RuntimeError(
+                "edge-tts is not installed. "
+                "Install it with: pip install edge-tts"
+            )
+
+        import asyncio
+
+        async def _run() -> bytes:
+            communicate = edge_tts.Communicate(text, self._voice)
+            audio_chunks: list[bytes] = []
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    audio_chunks.append(chunk["data"])
+            return b"".join(audio_chunks)
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        try:
+            if loop is not None and loop.is_running():
+                # Already inside an async context -- run in a new thread
+                import concurrent.futures
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    result = pool.submit(asyncio.run, _run()).result()
+                return result
+            else:
+                return asyncio.run(_run())
+        except Exception as exc:
+            logger.error("EdgeTTS synthesis failed: %s", exc)
+            return _generate_silence()
+
+    async def stream(self, text: str) -> AsyncIterator[bytes]:
+        """Stream audio chunks from Microsoft Edge TTS."""
+        if not text.strip():
+            yield _generate_silence()
+            return
+
+        try:
+            import edge_tts
+        except ImportError:
+            raise RuntimeError(
+                "edge-tts is not installed. "
+                "Install it with: pip install edge-tts"
+            )
+
+        try:
+            communicate = edge_tts.Communicate(text, self._voice)
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    yield chunk["data"]
+        except Exception as exc:
+            logger.error("EdgeTTS streaming failed: %s", exc)
+            yield _generate_silence()
+
+
+# =============================================================================
+# VoxtralTTS -- Legacy placeholder (deprecated, kept for backwards compat)
 # =============================================================================
 
 
 class VoxtralTTS(TTSProvider):
-    """Default local TTS using Voxtral model.
+    """Deprecated placeholder. Use KokoroTTS, PiperTTS, or EdgeTTS instead.
 
-    This is a placeholder implementation. The actual Voxtral model loading
-    will be implemented when the model becomes available. Currently falls
-    back to generating silence with a warning.
-
-    Parameters:
-        voice: Voice preset name.
+    Kept for backwards compatibility. Returns silence with a warning.
     """
 
     def __init__(self, voice: str = "default") -> None:
         self._voice = voice
-        self._model: Any = None
 
     def synthesize(self, text: str) -> bytes:
-        """Synthesize text to audio bytes (placeholder)."""
+        """Synthesize text to audio bytes (deprecated placeholder)."""
         logger.warning(
-            "VoxtralTTS is a placeholder -- returning silence. "
-            "Use KokoroTTS or a cloud provider for actual synthesis."
+            "VoxtralTTS is deprecated -- returning silence. "
+            "Use KokoroTTS, PiperTTS, or EdgeTTS for actual synthesis."
         )
-        # Return silence proportional to text length
         duration_ms = max(100, len(text) * 50)
         return _pcm_to_wav(_generate_silence(duration_ms))
 
     async def stream(self, text: str) -> AsyncIterator[bytes]:
-        """Stream audio chunks (placeholder)."""
+        """Stream audio chunks (deprecated placeholder)."""
         yield self.synthesize(text)
 
 
@@ -396,3 +600,55 @@ class OpenAITTS(TTSProvider):
         chunk_size = 4096
         for i in range(0, len(content), chunk_size):
             yield content[i : i + chunk_size]
+
+
+# =============================================================================
+# Auto-detection: pick the best available local TTS provider
+# =============================================================================
+
+
+def detect_best_tts() -> TTSProvider:
+    """Return the best available TTS provider (kokoro > piper > edge-tts).
+
+    Tries each local TTS library in order of quality and returns the first
+    one whose underlying package is importable. Falls back to ``EdgeTTS``
+    (which only requires ``edge-tts``) and finally raises ``RuntimeError``
+    if nothing is available.
+
+    Returns:
+        An instantiated ``TTSProvider`` ready for use.
+
+    Raises:
+        RuntimeError: If no TTS library is installed at all.
+    """
+    # 1. Kokoro -- best quality local model
+    try:
+        import kokoro  # noqa: F401
+
+        logger.info("Auto-detected TTS provider: KokoroTTS")
+        return KokoroTTS()
+    except ImportError:
+        pass
+
+    # 2. Piper -- lightweight edge model
+    try:
+        import piper  # noqa: F401
+
+        logger.info("Auto-detected TTS provider: PiperTTS")
+        return PiperTTS()
+    except ImportError:
+        pass
+
+    # 3. Edge TTS -- free cloud, no API key
+    try:
+        import edge_tts  # noqa: F401
+
+        logger.info("Auto-detected TTS provider: EdgeTTS")
+        return EdgeTTS()
+    except ImportError:
+        pass
+
+    raise RuntimeError(
+        "No TTS provider available. Install at least one of: "
+        "pip install kokoro | pip install piper-tts | pip install edge-tts"
+    )

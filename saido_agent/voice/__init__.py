@@ -24,10 +24,13 @@ from saido_agent.voice.stt import (
 )
 from saido_agent.voice.tts import (
     TTSProvider,
+    EdgeTTS,
     ElevenLabsTTS,
     KokoroTTS,
     OpenAITTS,
+    PiperTTS,
     VoxtralTTS,
+    detect_best_tts,
 )
 from saido_agent.voice.vad import SileroVAD
 from saido_agent.voice.recorder import check_recording_availability, record_until_silence
@@ -69,9 +72,12 @@ __all__ = [
     "DeepgramSTT",
     "WebSpeechSTT",
     "KokoroTTS",
+    "PiperTTS",
+    "EdgeTTS",
     "VoxtralTTS",
     "ElevenLabsTTS",
     "OpenAITTS",
+    "detect_best_tts",
     "SileroVAD",
     # Legacy API
     "check_voice_deps",
