@@ -147,6 +147,39 @@ class KnowledgeBridge:
         return self._rag is not None
 
     # ------------------------------------------------------------------
+    # Ingest (delegate to SmartRAG.ingest)
+    # ------------------------------------------------------------------
+
+    def ingest_file(self, path: str) -> dict:
+        """Ingest a file via SmartRAG. Returns dict with slug and status."""
+        if not self._require_rag("ingest_file"):
+            slug = Path(path).stem.replace(" ", "-").lower()
+            return {"slug": slug, "status": "degraded"}
+        assert self._rag is not None
+        result = self._rag.ingest(path)
+        return {
+            "slug": result.slug,
+            "title": result.title,
+            "status": result.status,
+            "children": result.children,
+            "error": result.error,
+        }
+
+    def ingest_text(self, text: str, title: str, metadata: dict = None) -> dict:
+        """Ingest raw text via SmartRAG. Returns dict with slug and status."""
+        if not self._require_rag("ingest_text"):
+            slug = title.replace(" ", "-").lower()
+            return {"slug": slug, "status": "degraded"}
+        assert self._rag is not None
+        result = self._rag.ingest_text(text, title, metadata)
+        return {
+            "slug": result.slug,
+            "title": result.title,
+            "status": result.status,
+            "error": result.error,
+        }
+
+    # ------------------------------------------------------------------
     # CRUD wrappers (delegate to SmartRAG._store)
     # ------------------------------------------------------------------
 

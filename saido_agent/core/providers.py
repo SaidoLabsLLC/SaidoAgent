@@ -432,6 +432,12 @@ def stream_openai_compat(
             text += delta.content
             yield TextChunk(delta.content)
 
+        # Handle reasoning/thinking tokens from models like Qwen 3
+        # Ollama exposes these via delta.reasoning (not in OpenAI SDK types)
+        reasoning_text = getattr(delta, "reasoning", None) or getattr(delta, "reasoning_content", None)
+        if reasoning_text:
+            yield ThinkingChunk(reasoning_text)
+
         if delta.tool_calls:
             for tc in delta.tool_calls:
                 idx = tc.index

@@ -304,7 +304,7 @@ class KnowledgeQA:
                 system="",
                 messages=messages,
                 tool_schemas=[],
-                config={},
+                config={"max_tokens": 2048, "no_tools": True},
             ):
                 from saido_agent.core.providers import (
                     AssistantTurn,

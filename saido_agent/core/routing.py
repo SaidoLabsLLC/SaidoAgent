@@ -105,6 +105,7 @@ class ModelRouter:
 
         self._load_routing_config()
         self._init_local_providers()
+        self.probe_local_providers()
 
     # -- Configuration -----------------------------------------------------------
 
