@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from saido_agent.core.tool_registry import ToolDef, register_tool
-from .store import MemoryEntry, save_memory, delete_memory, load_index
+from .store import MemoryEntry, save_memory, delete_memory, load_index, get_memory_by_id, to_knowledge_article
 from .context import find_relevant_memories
 from .scan import scan_all_memories, format_memory_manifest
 

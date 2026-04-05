@@ -1,0 +1,18 @@
+language: go
+
+patterns:
+  - name: functions
+    pattern: "func $FUNC($$$ARGS) $$$RET { $$$BODY }"
+    description: "Match Go function declarations"
+
+  - name: imports
+    pattern: 'import "$MODULE"'
+    description: "Match single import statements"
+
+  - name: http_handle
+    pattern: "http.HandleFunc($$$ARGS)"
+    description: "Match net/http HandleFunc route registrations"
+
+  - name: router_handle
+    pattern: "r.HandleFunc($$$ARGS)"
+    description: "Match gorilla/mux or chi router handlers"

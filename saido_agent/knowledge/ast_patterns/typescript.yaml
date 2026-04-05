@@ -1,0 +1,46 @@
+language: typescript
+
+patterns:
+  - name: function_declaration
+    pattern: "function $FUNC($$$ARGS) { $$$BODY }"
+    description: "Match named function declarations"
+
+  - name: arrow_function
+    pattern: "const $FUNC = ($$$ARGS) => { $$$BODY }"
+    description: "Match arrow function expressions assigned to const"
+
+  - name: arrow_expression
+    pattern: "const $FUNC = ($$$ARGS) => $EXPR"
+    description: "Match single-expression arrow functions"
+
+  - name: class_declaration
+    pattern: "class $NAME { $$$BODY }"
+    description: "Match class declarations"
+
+  - name: import_named
+    pattern: "import { $$$NAMES } from '$MODULE'"
+    description: "Match named ES module imports"
+
+  - name: import_default
+    pattern: "import $$$NAMES from '$MODULE'"
+    description: "Match default ES module imports"
+
+  - name: endpoint_get
+    pattern: "app.get($$$ARGS)"
+    description: "Match Express-style GET route handlers"
+
+  - name: endpoint_post
+    pattern: "app.post($$$ARGS)"
+    description: "Match Express-style POST route handlers"
+
+  - name: router_get
+    pattern: "router.get($$$ARGS)"
+    description: "Match Router GET handlers"
+
+  - name: router_post
+    pattern: "router.post($$$ARGS)"
+    description: "Match Router POST handlers"
+
+  - name: decorators
+    pattern: "@$DECORATOR($$$ARGS)"
+    description: "Match TypeScript decorators"

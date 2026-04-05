@@ -1,0 +1,42 @@
+language: javascript
+
+patterns:
+  - name: function_declaration
+    pattern: "function $FUNC($$$ARGS) { $$$BODY }"
+    description: "Match named function declarations"
+
+  - name: arrow_function
+    pattern: "const $FUNC = ($$$ARGS) => { $$$BODY }"
+    description: "Match arrow function expressions assigned to const"
+
+  - name: arrow_expression
+    pattern: "const $FUNC = ($$$ARGS) => $EXPR"
+    description: "Match single-expression arrow functions"
+
+  - name: class_declaration
+    pattern: "class $NAME { $$$BODY }"
+    description: "Match class declarations"
+
+  - name: import_esm
+    pattern: "import $$$NAMES from '$MODULE'"
+    description: "Match ES module import statements"
+
+  - name: require
+    pattern: "const $NAME = require('$MODULE')"
+    description: "Match CommonJS require statements"
+
+  - name: endpoint_get
+    pattern: "app.get($$$ARGS)"
+    description: "Match Express GET route handlers"
+
+  - name: endpoint_post
+    pattern: "app.post($$$ARGS)"
+    description: "Match Express POST route handlers"
+
+  - name: router_get
+    pattern: "router.get($$$ARGS)"
+    description: "Match Express Router GET handlers"
+
+  - name: router_post
+    pattern: "router.post($$$ARGS)"
+    description: "Match Express Router POST handlers"

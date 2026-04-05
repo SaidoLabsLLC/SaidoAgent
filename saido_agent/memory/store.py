@@ -153,6 +153,55 @@ def _rewrite_index(scope: str) -> None:
     index_path.write_text("\n".join(lines) + ("\n" if lines else ""))
 
 
+def get_memory_by_id(memory_id: str, scope: str = "all") -> MemoryEntry | None:
+    """Look up a memory by its slug (id). Returns None if not found."""
+    scopes = ["user", "project"] if scope == "all" else [scope]
+    for s in scopes:
+        mem_dir = get_memory_dir(s)
+        fp = mem_dir / f"{memory_id}.md"
+        if fp.exists():
+            try:
+                text = fp.read_text()
+            except Exception:
+                return None
+            meta, body = parse_frontmatter(text)
+            return MemoryEntry(
+                name=meta.get("name", fp.stem),
+                description=meta.get("description", ""),
+                type=meta.get("type", "user"),
+                content=body,
+                file_path=str(fp),
+                created=meta.get("created", ""),
+                scope=s,
+            )
+    return None
+
+
+def to_knowledge_article(entry: MemoryEntry) -> dict:
+    """Convert a MemoryEntry into a knowledge-store-compatible article dict.
+
+    This prepares the data structure for future KnowledgeBridge integration.
+    The actual wiring happens when the knowledge bridge is complete.
+    """
+    return {
+        "type": "memory",
+        "category": "agent-memory",
+        "title": entry.name,
+        "description": entry.description,
+        "content": entry.content,
+        "metadata": {
+            "memory_type": entry.type,
+            "scope": entry.scope,
+            "created": entry.created,
+            "source_file": entry.file_path,
+        },
+        "tags": [
+            f"scope:{entry.scope}",
+            f"memory-type:{entry.type}",
+        ],
+    }
+
+
 def get_index_content(scope: str = "user") -> str:
     mem_dir = get_memory_dir(scope)
     index_path = mem_dir / INDEX_FILENAME

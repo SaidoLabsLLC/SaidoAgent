@@ -1,0 +1,42 @@
+language: python
+
+patterns:
+  - name: functions
+    pattern: "def $FUNC($$$ARGS)"
+    description: "Match Python function definitions"
+
+  - name: classes
+    pattern: "class $NAME($$$BASES):"
+    description: "Match Python class definitions with bases"
+
+  - name: import_module
+    pattern: "import $MODULE"
+    description: "Match simple import statements"
+
+  - name: import_from
+    pattern: "from $MODULE import $$$NAMES"
+    description: "Match from-import statements"
+
+  - name: endpoint_route
+    pattern: "@app.route($$$ARGS)"
+    description: "Match Flask/FastAPI route decorators"
+
+  - name: endpoint_get
+    pattern: "@app.get($$$ARGS)"
+    description: "Match FastAPI GET endpoint decorators"
+
+  - name: endpoint_post
+    pattern: "@app.post($$$ARGS)"
+    description: "Match FastAPI POST endpoint decorators"
+
+  - name: endpoint_put
+    pattern: "@app.put($$$ARGS)"
+    description: "Match FastAPI PUT endpoint decorators"
+
+  - name: endpoint_delete
+    pattern: "@app.delete($$$ARGS)"
+    description: "Match FastAPI DELETE endpoint decorators"
+
+  - name: decorators
+    pattern: "@$DECORATOR($$$ARGS)"
+    description: "Match any decorator with arguments"

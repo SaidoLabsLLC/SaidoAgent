@@ -14,11 +14,17 @@ from .store import (  # noqa: F401
     load_entries,
     search_memory,
     get_index_content,
+    get_memory_by_id,
+    to_knowledge_article,
     parse_frontmatter,
     USER_MEMORY_DIR,
     INDEX_FILENAME,
     MAX_INDEX_LINES,
     MAX_INDEX_BYTES,
+)
+from .extract import (  # noqa: F401
+    ConversationExtractor,
+    ExtractedInsight,
 )
 from .scan import (  # noqa: F401
     MemoryHeader,
@@ -49,11 +55,15 @@ __all__ = [
     "load_entries",
     "search_memory",
     "get_index_content",
+    "get_memory_by_id",
+    "to_knowledge_article",
     "parse_frontmatter",
     "USER_MEMORY_DIR",
     "INDEX_FILENAME",
     "MAX_INDEX_LINES",
     "MAX_INDEX_BYTES",
+    "ConversationExtractor",
+    "ExtractedInsight",
     "MemoryHeader",
     "scan_memory_dir",
     "scan_all_memories",

@@ -354,14 +354,47 @@ def cmd_config(args: str, _state, config) -> bool:
         info(f"{k} = {v}")
     return True
 
-def cmd_save(args: str, state, _config) -> bool:
-    from saido_agent.core.config import SESSIONS_DIR
-    fname = args.strip() or f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.enc"
-    # Ensure encrypted extension
-    if fname.endswith(".json"):
-        fname = fname[:-5] + ".enc"
-    path = Path(fname) if "/" in fname else SESSIONS_DIR / fname
-    data = {
+def _build_session_data(state) -> dict:
+    """Build session data dict from state, including metadata for resume previews."""
+    # Extract first user message for preview
+    first_message_preview = ""
+    for m in state.messages:
+        if m.get("role") == "user":
+            content = m.get("content", "")
+            if isinstance(content, str):
+                first_message_preview = content[:120]
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        first_message_preview = block.get("text", "")[:120]
+                        break
+                    elif isinstance(block, str):
+                        first_message_preview = block[:120]
+                        break
+            break
+
+    # Collect active memory names
+    active_memories: list[str] = []
+    try:
+        from saido_agent.memory.scan import scan_all_memories
+        for h in scan_all_memories()[:20]:
+            active_memories.append(h.filename)
+    except Exception:
+        pass
+
+    # Collect tool call history summary
+    tool_calls: list[dict] = []
+    for m in state.messages:
+        content = m.get("content", "")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    tool_calls.append({
+                        "name": block.get("name", ""),
+                        "id": block.get("id", ""),
+                    })
+
+    return {
         "messages": [
             m if not isinstance(m.get("content"), list) else
             {**m, "content": [
@@ -373,7 +406,35 @@ def cmd_save(args: str, state, _config) -> bool:
         "turn_count": state.turn_count,
         "total_input_tokens": state.total_input_tokens,
         "total_output_tokens": state.total_output_tokens,
+        "saved_at": datetime.now().isoformat(),
+        "first_message_preview": first_message_preview,
+        "active_memories": active_memories,
+        "tool_call_count": len(tool_calls),
     }
+
+
+def cmd_save(args: str, state, _config) -> bool:
+    from saido_agent.core.config import SESSIONS_DIR
+    fname = args.strip() or f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.enc"
+    # Ensure encrypted extension
+    if fname.endswith(".json"):
+        fname = fname[:-5] + ".enc"
+    path = Path(fname) if "/" in fname else SESSIONS_DIR / fname
+    data = _build_session_data(state)
+
+    # Run conversation extraction on save
+    try:
+        from saido_agent.memory.extract import ConversationExtractor
+        extractor = ConversationExtractor(state.messages)
+        insights = extractor.extract(min_confidence=0.5)
+        if insights:
+            data["extracted_insights"] = [
+                {"category": i.category, "summary": i.summary, "confidence": i.confidence}
+                for i in insights
+            ]
+    except Exception:
+        pass
+
     path.write_bytes(_encrypt_session(data))
     ok(f"Session saved (encrypted) to {path}")
     return True
@@ -383,19 +444,7 @@ def save_latest(args: str, state, _config) -> bool:
     fname = "session_latest.enc"
     path = MR_SESSION_DIR / fname
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = {
-        "messages": [
-            m if not isinstance(m.get("content"), list) else
-            {**m, "content": [
-                b if isinstance(b, dict) else b.model_dump()
-                for b in m["content"]
-            ]}
-            for m in state.messages
-        ],
-        "turn_count": state.turn_count,
-        "total_input_tokens": state.total_input_tokens,
-        "total_output_tokens": state.total_output_tokens,
-    }
+    data = _build_session_data(state)
     path.write_bytes(_encrypt_session(data))
     ok(f"Session saved (encrypted) to {path}")
     return True
@@ -435,19 +484,52 @@ def cmd_load(args: str, state, _config) -> bool:
     return True
 
 def cmd_resume(args: str, state, _config) -> bool:
-    from saido_agent.core.config import MR_SESSION_DIR
+    from saido_agent.core.config import SESSIONS_DIR
 
     if not args.strip():
-        # Try encrypted first, then legacy
-        path = MR_SESSION_DIR / "session_latest.enc"
-        if not path.exists():
-            path = MR_SESSION_DIR / "session_latest.json"
-        if not path.exists():
-            info("No auto-saved sessions found.")
+        # List recent sessions with timestamps and first-message preview
+        sessions = sorted(
+            list(SESSIONS_DIR.glob("*.enc")) + list(SESSIONS_DIR.glob("*.json")),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if not sessions:
+            info("No saved sessions found.")
             return True
-    else:
-        fname = args.strip()
-        path = Path(fname) if "/" in fname else MR_SESSION_DIR / fname
+        info("Recent sessions:")
+        for s in sessions[:15]:
+            mtime = datetime.fromtimestamp(s.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            preview = ""
+            msg_count = 0
+            try:
+                if s.suffix == ".enc":
+                    data = _decrypt_session(s.read_bytes())
+                else:
+                    data = json.loads(s.read_text())
+                preview = data.get("first_message_preview", "")
+                msg_count = len(data.get("messages", []))
+                if not preview:
+                    # Fall back: extract first user message
+                    for m in data.get("messages", []):
+                        if m.get("role") == "user":
+                            content = m.get("content", "")
+                            if isinstance(content, str):
+                                preview = content[:80]
+                            elif isinstance(content, list):
+                                for block in content:
+                                    if isinstance(block, dict) and block.get("type") == "text":
+                                        preview = block.get("text", "")[:80]
+                                        break
+                            break
+            except Exception:
+                preview = "(unable to read)"
+            preview_display = f"  {preview}" if preview else ""
+            info(f"  {s.name}  [{mtime}]  ({msg_count} msgs){preview_display}")
+        info("\nUsage: /resume <session_filename> or /load <session_filename>")
+        return True
+
+    fname = args.strip()
+    path = Path(fname) if "/" in fname else SESSIONS_DIR / fname
 
     if not path.exists():
         err(f"File not found: {path}")
@@ -591,6 +673,50 @@ def cmd_memory(args: str, _state, _config) -> bool:
         if h.description:
             info(f"    {h.description}")
     return True
+
+def cmd_memories(args: str, _state, _config) -> bool:
+    """List all memories with scope filtering: /memories [user|project]"""
+    from saido_agent.memory.scan import scan_all_memories, format_memory_manifest
+
+    scope_filter = args.strip().lower() if args.strip() else "all"
+    if scope_filter not in ("all", "user", "project"):
+        err(f"Unknown scope: {scope_filter}. Use 'user', 'project', or omit for all.")
+        return True
+
+    headers = scan_all_memories()
+    if scope_filter != "all":
+        headers = [h for h in headers if h.scope == scope_filter]
+
+    if not headers:
+        info(f"No {scope_filter} memories stored.")
+        return True
+    info(f"  {len(headers)} memory/memories ({scope_filter} scope, newest first):")
+    info(format_memory_manifest(headers))
+    return True
+
+
+def cmd_forget(args: str, _state, _config) -> bool:
+    """Delete a specific memory by slug/id: /forget <memory_id> [scope]"""
+    from saido_agent.memory.store import delete_memory, get_memory_by_id, _slugify
+
+    parts = args.strip().split()
+    if not parts:
+        err("Usage: /forget <memory_name_or_slug> [user|project]")
+        return True
+
+    memory_id = _slugify(parts[0])
+    scope = parts[1] if len(parts) > 1 else "all"
+
+    # Look up the memory first to confirm it exists
+    entry = get_memory_by_id(memory_id, scope=scope)
+    if not entry:
+        err(f"Memory '{parts[0]}' not found (slug: {memory_id}, scope: {scope}).")
+        return True
+
+    delete_memory(entry.name, scope=entry.scope)
+    ok(f"Deleted memory: '{entry.name}' (scope: {entry.scope})")
+    return True
+
 
 def cmd_agents(_args: str, _state, _config) -> bool:
     try:
@@ -1113,6 +1239,8 @@ COMMANDS = {
     "cwd":         cmd_cwd,
     "skills":      cmd_skills,
     "memory":      cmd_memory,
+    "memories":    cmd_memories,
+    "forget":      cmd_forget,
     "agents":      cmd_agents,
     "mcp":         cmd_mcp,
     "plugin":      cmd_plugin,
@@ -1256,6 +1384,22 @@ def repl(config: dict, initial_prompt: str = None):
         from saido_agent.core.tools import drain_pending_questions
         drain_pending_questions()
 
+    # ── Auto-save configuration ──
+    autosave_interval = config.get("autosave_interval", 5)  # save every N messages
+    _last_autosave_turn = 0
+
+    def _maybe_autosave():
+        """Auto-save session every autosave_interval messages as crash protection."""
+        nonlocal _last_autosave_turn
+        if autosave_interval <= 0:
+            return
+        if state.turn_count - _last_autosave_turn >= autosave_interval:
+            try:
+                save_latest("", state, config)
+                _last_autosave_turn = state.turn_count
+            except Exception:
+                pass  # Silent failure for auto-save
+
     # ── Main loop ──
     if initial_prompt:
         try:
@@ -1290,6 +1434,7 @@ def repl(config: dict, initial_prompt: str = None):
                 _, voice_text = result
                 try:
                     run_query(voice_text)
+                    _maybe_autosave()
                 except KeyboardInterrupt:
                     print(clr("\n  (interrupted)", "yellow"))
                 continue
@@ -1300,6 +1445,7 @@ def repl(config: dict, initial_prompt: str = None):
                 from saido_agent.skills import substitute_arguments
                 rendered = substitute_arguments(skill.prompt, skill_args, skill.arguments)
                 run_query(f"[Skill: {skill.name}]\n\n{rendered}")
+                _maybe_autosave()
             except KeyboardInterrupt:
                 print(clr("\n  (interrupted)", "yellow"))
             continue
@@ -1308,6 +1454,7 @@ def repl(config: dict, initial_prompt: str = None):
 
         try:
             run_query(user_input)
+            _maybe_autosave()
         except KeyboardInterrupt:
             print(clr("\n  (interrupted)", "yellow"))
             # Keep conversation history up to the interruption

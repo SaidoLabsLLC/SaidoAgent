@@ -1,0 +1,30 @@
+language: java
+
+patterns:
+  - name: methods
+    pattern: "$$$MODS $RET $FUNC($$$ARGS) { $$$BODY }"
+    description: "Match Java method declarations"
+
+  - name: classes
+    pattern: "$$$MODS class $NAME { $$$BODY }"
+    description: "Match Java class declarations"
+
+  - name: imports
+    pattern: "import $$$PATH;"
+    description: "Match Java import statements"
+
+  - name: get_mapping
+    pattern: "@GetMapping($$$ARGS)"
+    description: "Match Spring Boot GET mapping annotations"
+
+  - name: post_mapping
+    pattern: "@PostMapping($$$ARGS)"
+    description: "Match Spring Boot POST mapping annotations"
+
+  - name: request_mapping
+    pattern: "@RequestMapping($$$ARGS)"
+    description: "Match Spring Boot request mapping annotations"
+
+  - name: annotations
+    pattern: "@$ANNOTATION($$$ARGS)"
+    description: "Match any Java annotation with arguments"

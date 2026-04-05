@@ -1,0 +1,14 @@
+language: rust
+
+patterns:
+  - name: functions
+    pattern: "fn $FUNC($$$ARGS) $$$RET { $$$BODY }"
+    description: "Match Rust function definitions"
+
+  - name: imports
+    pattern: "use $$$PATH;"
+    description: "Match use/import statements"
+
+  - name: attributes
+    pattern: "#[$ATTR($$$ARGS)]"
+    description: "Match Rust attribute macros (derive, test, etc.)"
