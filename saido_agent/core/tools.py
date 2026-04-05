@@ -673,9 +673,54 @@ def _has_rg() -> bool:
         return False
 
 
+# -- MED-2: Regex DoS protection --
+
+# Configurable limits
+REGEX_TIMEOUT_SECONDS = 5
+GREP_MAX_RESULTS = 1000
+
+# Patterns that indicate catastrophic backtracking risk
+_REDOS_PATTERNS = [
+    # Nested quantifiers: (a+)+, (a*)+, (a+)*, (a*)*, etc.
+    re.compile(r'\([^)]*[+*][^)]*\)[+*]'),
+    # Alternation inside repeated group with quantified branch: (a|b+)+
+    re.compile(r'\([^)]*\|[^)]*[+*][^)]*\)[+*]'),
+    # Quantified group containing alternation with quantified branch
+    re.compile(r'\([^)]*[+*][^)]*\|[^)]*\)[+*]'),
+]
+
+
+def _validate_regex(pattern: str) -> tuple[bool, str]:
+    """Validate a regex pattern for safety against catastrophic backtracking.
+
+    Returns:
+        (is_safe, reason) — is_safe is True when the pattern passes checks.
+    """
+    # First check: is it even valid regex?
+    try:
+        re.compile(pattern)
+    except re.error as e:
+        return False, f"Invalid regex: {e}"
+
+    # Check for known ReDoS anti-patterns
+    for redos_pat in _REDOS_PATTERNS:
+        if redos_pat.search(pattern):
+            return False, (
+                f"Rejected: pattern contains nested quantifiers that risk "
+                f"catastrophic backtracking (ReDoS). Simplify the regex."
+            )
+
+    return True, "ok"
+
+
 def _grep(pattern: str, path: str = None, glob: str = None,
           output_mode: str = "files_with_matches",
           case_insensitive: bool = False, context: int = 0) -> str:
+    # MED-2: Validate regex before executing
+    is_safe, reason = _validate_regex(pattern)
+    if not is_safe:
+        return f"Error: {reason}"
+
     search_path = path or str(Path.cwd())
     try:
         search_path = get_sandbox().validate(search_path, "grep")
@@ -699,14 +744,34 @@ def _grep(pattern: str, path: str = None, glob: str = None,
     cmd.append(pattern)
     cmd.append(path or str(Path.cwd()))
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        r = subprocess.run(
+            cmd, capture_output=True, text=True,
+            timeout=REGEX_TIMEOUT_SECONDS,
+        )
         out = r.stdout.strip()
-        return out[:20000] if out else "No matches found"
+        if not out:
+            return "No matches found"
+        # MED-2: Enforce result set limit
+        lines = out.splitlines()
+        if len(lines) > GREP_MAX_RESULTS:
+            lines = lines[:GREP_MAX_RESULTS]
+            out = "\n".join(lines) + f"\n\n[... truncated at {GREP_MAX_RESULTS} results]"
+        else:
+            out = "\n".join(lines)
+        return out[:20000]
+    except subprocess.TimeoutExpired:
+        return f"Error: regex search timed out after {REGEX_TIMEOUT_SECONDS}s (pattern may be too complex)"
     except Exception as e:
         return f"Error: {e}"
 
 
 def _webfetch(url: str, prompt: str = None) -> str:
+    # MED-1: SSRF protection — validate URL before any outbound request
+    from saido_agent.core.ssrf import validate_url
+    is_safe, reason = validate_url(url)
+    if not is_safe:
+        return f"Error: SSRF protection blocked request — {reason}"
+
     try:
         import httpx
         r = httpx.get(url, headers={"User-Agent": "SaidoAgent/0.1"},
@@ -730,6 +795,13 @@ def _webfetch(url: str, prompt: str = None) -> str:
 
 
 def _websearch(query: str) -> str:
+    # MED-1: SSRF protection — validate search endpoint
+    from saido_agent.core.ssrf import validate_url_no_resolve
+    search_url = "https://html.duckduckgo.com/html/"
+    is_safe, reason = validate_url_no_resolve(search_url)
+    if not is_safe:
+        return f"Error: SSRF protection blocked request — {reason}"
+
     try:
         import httpx
         url = "https://html.duckduckgo.com/html/"

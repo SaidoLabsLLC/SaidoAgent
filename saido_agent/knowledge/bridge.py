@@ -48,6 +48,16 @@ except ImportError:
     SearchResult = None  # type: ignore[assignment,misc]
 
 # ---------------------------------------------------------------------------
+# Embeddings extra availability check
+# ---------------------------------------------------------------------------
+try:
+    from smartrag.embeddings import EmbeddingIndex  # noqa: F401
+
+    HAS_EMBEDDINGS = True
+except ImportError:
+    HAS_EMBEDDINGS = False
+
+# ---------------------------------------------------------------------------
 # Wikilink regex for backlink extraction
 # ---------------------------------------------------------------------------
 _WIKILINK_RE = re.compile(r"\[\[([^\]|#]+?)(?:#[^\]|]*)?(?:\|[^\]]+)?\]\]")
@@ -251,6 +261,54 @@ class KnowledgeBridge:
             return {"document_count": 0, "index_size_bytes": 0, "categories": []}
         assert self._rag is not None
         return self._rag.stats
+
+    @property
+    def embeddings_enabled(self) -> bool:
+        """True when embeddings are enabled in the bridge config."""
+        return self._config.embeddings
+
+    def embeddings_status(self) -> dict[str, Any]:
+        """Return embedding coverage statistics.
+
+        Returns dict with keys:
+        - enabled: whether embeddings are configured on
+        - available: whether smartrag[embeddings] extra is installed
+        - total_articles: total articles in the store
+        - articles_with_embeddings: articles that have embedding vectors
+        """
+        total = 0
+        with_embeddings = 0
+        if self._rag is not None:
+            st = self._rag.stats
+            total = st.get("document_count", 0)
+            with_embeddings = st.get("embedded_count", 0)
+        return {
+            "enabled": self._config.embeddings,
+            "available": HAS_EMBEDDINGS,
+            "total_articles": total,
+            "articles_with_embeddings": with_embeddings,
+        }
+
+    def enable_embeddings(self) -> None:
+        """Enable embeddings and reinitialize SmartRAG with the new config."""
+        if not HAS_EMBEDDINGS:
+            raise RuntimeError(
+                "Embeddings extra not installed. "
+                "Run: pip install smartrag[embeddings]"
+            )
+        self._config.embeddings = True
+        if SMARTRAG_AVAILABLE:
+            sr_config = self._config.to_smartrag_config()
+            self._rag = SmartRAG(str(self._root), sr_config)
+            logger.info("SmartRAG reinitialized with embeddings enabled")
+
+    def disable_embeddings(self) -> None:
+        """Disable embeddings and reinitialize SmartRAG without them."""
+        self._config.embeddings = False
+        if SMARTRAG_AVAILABLE:
+            sr_config = self._config.to_smartrag_config()
+            self._rag = SmartRAG(str(self._root), sr_config)
+            logger.info("SmartRAG reinitialized with embeddings disabled")
 
     # ------------------------------------------------------------------
     # Saido-specific extensions (NOT in SmartRAG)

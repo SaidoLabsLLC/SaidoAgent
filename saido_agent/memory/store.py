@@ -6,18 +6,101 @@ Storage layout:
 """
 from __future__ import annotations
 
+import json
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
 
+log = logging.getLogger(__name__)
+
 # -- Paths --
 
 USER_MEMORY_DIR = Path.home() / ".saido_agent" / "memory"
+TRUSTED_PROJECTS_FILE = Path.home() / ".saido_agent" / "trusted_projects.json"
 INDEX_FILENAME = "MEMORY.md"
 
 MAX_INDEX_LINES = 200
 MAX_INDEX_BYTES = 25_000
+
+
+# -- MED-4: Memory trust boundary --
+
+def _load_trusted_projects() -> list[str]:
+    """Load list of trusted project directories."""
+    if not TRUSTED_PROJECTS_FILE.exists():
+        return []
+    try:
+        data = json.loads(TRUSTED_PROJECTS_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _save_trusted_projects(trusted: list[str]) -> None:
+    """Persist trusted project directories."""
+    TRUSTED_PROJECTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    TRUSTED_PROJECTS_FILE.write_text(
+        json.dumps(sorted(set(trusted)), indent=2), encoding="utf-8"
+    )
+
+
+def is_trusted_project(path: str | Path) -> bool:
+    """Check whether a project directory has been explicitly trusted."""
+    resolved = str(Path(path).resolve())
+    return resolved in _load_trusted_projects()
+
+
+def trust_project(path: str | Path) -> None:
+    """Mark a project directory as trusted for memory loading."""
+    resolved = str(Path(path).resolve())
+    trusted = _load_trusted_projects()
+    if resolved not in trusted:
+        trusted.append(resolved)
+        _save_trusted_projects(trusted)
+        log.info("Trusted project directory: %s", resolved)
+
+
+def check_project_trust(path: str | Path, *, prompt_fn=None) -> bool:
+    """Verify trust for a project directory, prompting if needed.
+
+    Args:
+        path: Project directory to check.
+        prompt_fn: Callable that takes a message string and returns bool
+            (True = user approves). If None, returns False for untrusted dirs.
+
+    Returns:
+        True if the directory is trusted (or was just approved by the user).
+    """
+    resolved = Path(path).resolve()
+    resolved_str = str(resolved)
+
+    # User-level memory is always trusted
+    user_dir = Path.home() / ".saido_agent"
+    if str(resolved).startswith(str(user_dir)):
+        return True
+
+    if is_trusted_project(resolved_str):
+        return True
+
+    # Directory not yet trusted — prompt
+    msg = (
+        f"Loading project memories from {resolved_str}. "
+        f"This directory was not created by Saido Agent. Continue? [y/N]"
+    )
+
+    if prompt_fn is not None:
+        approved = prompt_fn(msg)
+    else:
+        approved = False
+
+    if approved:
+        trust_project(resolved_str)
+        return True
+
+    log.warning("Untrusted project memory directory rejected: %s", resolved_str)
+    return False
 
 
 def get_project_memory_dir() -> Path:
@@ -99,10 +182,19 @@ def delete_memory(name: str, scope: str = "user") -> None:
     _rewrite_index(scope)
 
 
-def load_entries(scope: str = "user") -> list[MemoryEntry]:
+def load_entries(scope: str = "user", *, prompt_fn=None) -> list[MemoryEntry]:
     mem_dir = get_memory_dir(scope)
     if not mem_dir.exists():
         return []
+
+    # MED-4: Trust boundary for project-scoped memories
+    if scope == "project":
+        # The project root is the current working directory
+        project_root = Path.cwd()
+        if not check_project_trust(project_root, prompt_fn=prompt_fn):
+            log.warning("Skipping untrusted project memories in %s", mem_dir)
+            return []
+
     entries: list[MemoryEntry] = []
     for fp in sorted(mem_dir.glob("*.md")):
         if fp.name == INDEX_FILENAME:

@@ -80,6 +80,21 @@ class SaidoConfig:
         """Default LLM provider."""
         return self._data.get("provider", "")
 
+    @property
+    def embeddings_enabled(self) -> bool:
+        """Whether semantic embeddings are enabled (default: False, FTS5-only)."""
+        return bool(self._data.get("embeddings_enabled", False))
+
+    @property
+    def embeddings_model(self) -> str:
+        """Sentence-transformer model for embeddings."""
+        return self._data.get("embeddings_model", "all-MiniLM-L6-v2")
+
+    @property
+    def embeddings_quantize(self) -> bool:
+        """Whether to quantize embedding vectors for reduced storage."""
+        return bool(self._data.get("embeddings_quantize", False))
+
     # ------------------------------------------------------------------
     # Mutation
     # ------------------------------------------------------------------

@@ -51,6 +51,18 @@ class CostTracker:
     """Tracks token usage and costs across an entire session."""
     _usage: dict[str, ModelUsage] = field(default_factory=dict)
 
+    # MED-3: Budget limits
+    _max_tokens: int = 1_000_000
+    _max_turns: int = 200
+    _current_turns: int = 0
+    _budget_warned: bool = False
+    _budget_paused: bool = False
+
+    def set_budget(self, max_tokens: int = 1_000_000, max_turns: int = 200) -> None:
+        """Configure budget limits."""
+        self._max_tokens = max_tokens
+        self._max_turns = max_turns
+
     def record(self, provider: str, model: str, input_tokens: int, output_tokens: int) -> None:
         """Record token usage for a provider/model combination."""
         key = f"{provider}/{model}"
@@ -59,6 +71,89 @@ class CostTracker:
         entry = self._usage[key]
         entry.input_tokens += input_tokens
         entry.output_tokens += output_tokens
+
+    def record_turn(self) -> None:
+        """Record a conversation turn."""
+        self._current_turns += 1
+
+    def check_budget(self) -> tuple[str, bool]:
+        """Check budget status.
+
+        Returns:
+            (status_message, can_continue) — can_continue is False when
+            budget is exceeded and requires user confirmation.
+        """
+        total = self.total_tokens
+        token_pct = (total / self._max_tokens * 100) if self._max_tokens > 0 else 0
+        turn_pct = (self._current_turns / self._max_turns * 100) if self._max_turns > 0 else 0
+
+        # Check hard limits (100%)
+        if total >= self._max_tokens:
+            self._budget_paused = True
+            return (
+                f"TOKEN BUDGET EXCEEDED: {total:,} / {self._max_tokens:,} tokens "
+                f"({token_pct:.0f}%). Session paused — confirm to continue.",
+                False,
+            )
+
+        if self._current_turns >= self._max_turns:
+            self._budget_paused = True
+            return (
+                f"TURN LIMIT REACHED: {self._current_turns} / {self._max_turns} turns "
+                f"({turn_pct:.0f}%). Session paused — confirm to continue.",
+                False,
+            )
+
+        # Check warning threshold (80%)
+        warnings: list[str] = []
+        if token_pct >= 80 and not self._budget_warned:
+            warnings.append(
+                f"Token budget at {token_pct:.0f}%: {total:,} / {self._max_tokens:,}"
+            )
+        if turn_pct >= 80 and not self._budget_warned:
+            warnings.append(
+                f"Turn limit at {turn_pct:.0f}%: {self._current_turns} / {self._max_turns}"
+            )
+
+        if warnings:
+            self._budget_warned = True
+            return (
+                "WARNING: " + "; ".join(warnings) + ". Consider wrapping up.",
+                True,
+            )
+
+        return ("", True)
+
+    def confirm_budget_override(self) -> None:
+        """User has confirmed they want to continue past budget limits."""
+        self._budget_paused = False
+        # Double the limits so we don't immediately re-pause
+        self._max_tokens = int(self._max_tokens * 1.5)
+        self._max_turns = int(self._max_turns * 1.5)
+        self._budget_warned = False
+
+    def format_budget(self) -> str:
+        """Format budget status for the /budget command."""
+        total = self.total_tokens
+        token_pct = (total / self._max_tokens * 100) if self._max_tokens > 0 else 0
+        turn_pct = (self._current_turns / self._max_turns * 100) if self._max_turns > 0 else 0
+
+        remaining_tokens = max(0, self._max_tokens - total)
+        remaining_turns = max(0, self._max_turns - self._current_turns)
+
+        lines = [
+            "Session budget:",
+            f"  Tokens: {total:,} / {self._max_tokens:,} ({token_pct:.1f}%) — {remaining_tokens:,} remaining",
+            f"  Turns:  {self._current_turns} / {self._max_turns} ({turn_pct:.1f}%) — {remaining_turns} remaining",
+            f"  Cost:   ${self.total_cost:.4f}",
+        ]
+        if self._budget_paused:
+            lines.append("  Status: PAUSED (budget exceeded — awaiting confirmation)")
+        elif self._budget_warned:
+            lines.append("  Status: WARNING (approaching limits)")
+        else:
+            lines.append("  Status: OK")
+        return "\n".join(lines)
 
     @property
     def total_cost(self) -> float:

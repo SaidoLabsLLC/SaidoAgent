@@ -70,9 +70,21 @@ class SaidoAgent:
         # -- Internal components (lazy-initialized where possible) --
 
         # 1. KnowledgeBridge
-        from saido_agent.knowledge.bridge import BridgeConfig, KnowledgeBridge
+        from saido_agent.knowledge.bridge import BridgeConfig, KnowledgeBridge, HAS_EMBEDDINGS
 
-        bridge_cfg = BridgeConfig(knowledge_root=self._knowledge_dir)
+        # Wire embeddings from SaidoConfig if available
+        embeddings_on = False
+        try:
+            from saido_agent.config import SaidoConfig
+            _cfg = SaidoConfig()
+            embeddings_on = _cfg.embeddings_enabled and HAS_EMBEDDINGS
+        except Exception:
+            pass
+
+        bridge_cfg = BridgeConfig(
+            knowledge_root=self._knowledge_dir,
+            embeddings=embeddings_on,
+        )
         self._bridge = KnowledgeBridge(config=bridge_cfg)
 
         # 2. ModelRouter

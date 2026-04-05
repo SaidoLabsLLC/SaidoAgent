@@ -22,6 +22,7 @@ Slash commands in REPL:
   /history    Print conversation history
   /context    Show context window usage
   /cost       Show cost tracking dashboard (tokens, spend, savings)
+  /budget     Show session budget (token/turn limits and remaining)
   /verbose    Toggle verbose mode
   /thinking   Toggle extended thinking
   /permissions [mode]  Set permission mode
@@ -67,8 +68,15 @@ Knowledge commands:
   /lint --fix       Auto-fix suggestions for issues found
   /reindex          Incremental LLM reindex (summaries, concepts, categories)
   /reindex --full   Full reindex (re-process ALL articles)
+  /reindex --embeddings  Reindex with embedding regeneration
+  /embeddings enable     Enable semantic embedding layer
+  /embeddings disable    Disable embeddings (FTS5-only fallback)
+  /embeddings status     Show embedding coverage statistics
   /concepts         Display concept map as formatted output
   /categories       Display category hierarchy
+  /report <topic>   Generate a structured report on a topic
+  /export docs      Export full knowledge store as zip
+  /export article <slug>  Export a single article as markdown
   /refresh          Re-probe local models via ModelRouter
   /cloud <message>  Force cloud model for a single query
   /stats            Display knowledge store statistics
@@ -630,6 +638,16 @@ def cmd_cost(_args: str, state, config) -> bool:
     info(f"Input tokens:  {state.total_input_tokens:,}")
     info(f"Output tokens: {state.total_output_tokens:,}")
     info(f"Est. cost:     ${cost:.4f} USD")
+    return True
+
+def cmd_budget(_args: str, _state, config) -> bool:
+    """Show session budget status (tokens, turns, remaining)."""
+    kt = config.get("_knowledge_context", {})
+    cost_tracker = kt.get("cost_tracker") if isinstance(kt, dict) else None
+    if cost_tracker is None:
+        info("Budget tracking not available (cost tracker not initialized)")
+        return True
+    info(cost_tracker.format_budget())
     return True
 
 def cmd_verbose(_args: str, _state, config) -> bool:
@@ -1815,11 +1833,32 @@ def cmd_reindex(args: str, _state, config) -> bool:
         err("Knowledge subsystem not available.")
         return True
 
+    arg_parts = args.strip().split()
+    embed_reindex = "--embeddings" in arg_parts
+
+    # Handle --embeddings: enable embeddings on bridge and do full SmartRAG reindex
+    if embed_reindex:
+        from saido_agent.knowledge.bridge import HAS_EMBEDDINGS
+        if not HAS_EMBEDDINGS:
+            err(
+                "Embeddings extra not installed. "
+                "Run: pip install smartrag[embeddings]"
+            )
+            return True
+        info("Reindexing with embedding regeneration...")
+        try:
+            bridge.enable_embeddings()
+            count = bridge.reindex(incremental=False)
+            ok(f"Embedding reindex complete: {count} documents processed.")
+        except Exception as e:
+            err(f"Embedding reindex failed: {e}")
+        return True
+
     from saido_agent.knowledge.index import WikiIndexer
 
     router = kctx.get("model_router")
     indexer = WikiIndexer(bridge, model_router=router)
-    full = args.strip() == "--full"
+    full = "--full" in arg_parts
     mode = "full" if full else "incremental"
     info(f"Running {mode} reindex...")
 
@@ -1906,6 +1945,147 @@ def cmd_categories(_args: str, _state, config) -> bool:
     return True
 
 
+def cmd_embeddings(args: str, _state, config) -> bool:
+    """Manage semantic embedding layer: enable, disable, status."""
+    from saido_agent.knowledge.bridge import HAS_EMBEDDINGS
+
+    sub = args.strip().lower()
+    kctx = _get_kctx(config)
+    bridge = kctx.get("bridge")
+
+    if sub == "enable":
+        if not HAS_EMBEDDINGS:
+            err(
+                "Embeddings extra not installed. "
+                "Run: pip install smartrag[embeddings]"
+            )
+            return True
+        try:
+            from saido_agent.config import SaidoConfig
+            saido_cfg = SaidoConfig()
+            saido_cfg.update(embeddings_enabled=True)
+        except Exception as exc:
+            err(f"Failed to update config: {exc}")
+            return True
+        if bridge is not None and bridge.available:
+            try:
+                bridge.enable_embeddings()
+                count = bridge.reindex(incremental=False)
+                ok(f"Embeddings enabled. Reindexed {count} documents with embeddings.")
+            except Exception as exc:
+                err(f"Failed to enable embeddings on bridge: {exc}")
+        else:
+            ok("Embeddings enabled in config. Restart to apply.")
+        return True
+
+    elif sub == "disable":
+        try:
+            from saido_agent.config import SaidoConfig
+            saido_cfg = SaidoConfig()
+            saido_cfg.update(embeddings_enabled=False)
+        except Exception as exc:
+            err(f"Failed to update config: {exc}")
+            return True
+        if bridge is not None and bridge.available:
+            try:
+                bridge.disable_embeddings()
+                ok("Embeddings disabled. Falling back to FTS5-only search.")
+            except Exception as exc:
+                err(f"Failed to disable embeddings on bridge: {exc}")
+        else:
+            ok("Embeddings disabled in config.")
+        return True
+
+    elif sub == "status":
+        if bridge is None or not bridge.available:
+            err("Knowledge subsystem not available.")
+            return True
+        status = bridge.embeddings_status()
+        info(f"Embeddings enabled:   {status['enabled']}")
+        info(f"Extra installed:      {status['available']}")
+        info(f"Total articles:       {status['total_articles']}")
+        info(f"With embeddings:      {status['articles_with_embeddings']}")
+        if status['total_articles'] > 0:
+            pct = (status['articles_with_embeddings'] / status['total_articles']) * 100
+            info(f"Coverage:             {pct:.1f}%")
+        return True
+
+    else:
+        info("Usage:")
+        info("  /embeddings enable   — Enable semantic embeddings")
+        info("  /embeddings disable  — Disable (FTS5-only fallback)")
+        info("  /embeddings status   — Show embedding coverage")
+        return True
+
+
+# ── Report & export slash commands ────────────────────────────────────────
+
+
+def cmd_report(args: str, _state, config) -> bool:
+    """Generate a structured report from knowledge articles on a topic."""
+    kctx = _get_kctx(config)
+    bridge = kctx.get("bridge")
+    if bridge is None or not bridge.available:
+        err("Knowledge subsystem not available.")
+        return True
+    topic = args.strip()
+    if not topic:
+        err("Usage: /report <topic>")
+        return True
+    info(f"Generating report on: {topic}")
+    try:
+        from saido_agent.knowledge.outputs import ReportGenerator
+        gen = ReportGenerator(bridge, model_router=kctx.get("model_router"))
+        result = gen.generate_report(topic)
+        if result.status == "generated":
+            ok(f"Report generated: {result.path}")
+            info(f"  {result.word_count} words, {result.articles_cited} sources cited")
+        else:
+            err(f"Report failed: {result.error}")
+    except Exception as e:
+        err(f"Report generation failed: {e}")
+    return True
+
+
+def cmd_export(args: str, _state, config) -> bool:
+    """Export knowledge store articles (full store or single article)."""
+    kctx = _get_kctx(config)
+    bridge = kctx.get("bridge")
+    if bridge is None or not bridge.available:
+        err("Knowledge subsystem not available.")
+        return True
+    parts = args.strip().split(None, 1)
+    subcmd = parts[0].lower() if parts else ""
+
+    try:
+        from saido_agent.knowledge.outputs import ReportGenerator
+        gen = ReportGenerator(bridge, model_router=kctx.get("model_router"))
+    except Exception as e:
+        err(f"Export init failed: {e}")
+        return True
+
+    if subcmd == "docs":
+        info("Exporting full knowledge store...")
+        path = gen.export_docs()
+        if path:
+            ok(f"Exported to: {path}")
+        else:
+            err("Export failed — no articles found.")
+    elif subcmd == "article":
+        slug = parts[1].strip() if len(parts) > 1 else ""
+        if not slug:
+            err("Usage: /export article <slug>")
+            return True
+        path = gen.export_article(slug)
+        if path:
+            ok(f"Exported article to: {path}")
+        else:
+            err(f"Article not found: {slug}")
+    else:
+        err("Usage: /export docs | /export article <slug>")
+    return True
+
+
 COMMANDS = {
     "help":           cmd_help,
     "clear":          cmd_clear,
@@ -1916,6 +2096,7 @@ COMMANDS = {
     "history":        cmd_history,
     "context":        cmd_context,
     "cost":           cmd_cost,
+    "budget":         cmd_budget,
     "verbose":        cmd_verbose,
     "thinking":       cmd_thinking,
     "permissions":    cmd_permissions,
@@ -1942,6 +2123,7 @@ COMMANDS = {
     "cloud":          cmd_cloud,
     "stats":          cmd_stats,
     "reindex":        cmd_reindex,
+    "embeddings":     cmd_embeddings,
     "concepts":       cmd_concepts,
     "categories":     cmd_categories,
     "exit":           cmd_exit,
@@ -1950,6 +2132,8 @@ COMMANDS = {
     "ingest-mcp":     cmd_ingest_mcp,
     "mcp-setup":      cmd_mcp_setup,
     "mcp-auto":       cmd_mcp_auto,
+    "report":         cmd_report,
+    "export":         cmd_export,
 }
 
 
@@ -2038,10 +2222,18 @@ def _init_knowledge_context(config: dict) -> dict:
 
     # Knowledge components (require SmartRAG)
     try:
-        from saido_agent.knowledge.bridge import KnowledgeBridge, BridgeConfig, SMARTRAG_AVAILABLE
+        from saido_agent.knowledge.bridge import KnowledgeBridge, BridgeConfig, SMARTRAG_AVAILABLE, HAS_EMBEDDINGS
         if not SMARTRAG_AVAILABLE:
             return kctx
-        bridge = KnowledgeBridge(BridgeConfig())
+        # Wire embeddings config from SaidoConfig into BridgeConfig
+        embeddings_on = False
+        try:
+            from saido_agent.config import SaidoConfig
+            saido_cfg = SaidoConfig()
+            embeddings_on = saido_cfg.embeddings_enabled and HAS_EMBEDDINGS
+        except Exception:
+            pass
+        bridge = KnowledgeBridge(BridgeConfig(embeddings=embeddings_on))
         kctx["bridge"] = bridge
     except Exception:
         return kctx

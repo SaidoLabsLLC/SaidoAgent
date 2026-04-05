@@ -26,8 +26,15 @@ def tmp_memory_dir(tmp_path):
     project_dir = tmp_path / "project_memory"
     project_dir.mkdir()
 
+    # MED-4: Auto-trust the cwd so existing tests pass the trust boundary check
+    trusted_file = tmp_path / "trusted_projects.json"
+
     with patch("saido_agent.memory.store.USER_MEMORY_DIR", user_dir), \
-         patch("saido_agent.memory.store.get_project_memory_dir", return_value=project_dir):
+         patch("saido_agent.memory.store.get_project_memory_dir", return_value=project_dir), \
+         patch("saido_agent.memory.store.TRUSTED_PROJECTS_FILE", trusted_file):
+        from saido_agent.memory.store import trust_project
+        import os
+        trust_project(os.getcwd())
         yield {"user": user_dir, "project": project_dir}
 
 
