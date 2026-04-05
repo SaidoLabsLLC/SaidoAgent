@@ -1,0 +1,2 @@
+[console_scripts]
+saido-agent = saido_agent.cli.repl:main

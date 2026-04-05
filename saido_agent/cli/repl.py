@@ -21,7 +21,7 @@ Slash commands in REPL:
   /load [f]   Load session from file
   /history    Print conversation history
   /context    Show context window usage
-  /cost       Show API cost this session
+  /cost       Show cost tracking dashboard (tokens, spend, savings)
   /verbose    Toggle verbose mode
   /thinking   Toggle extended thinking
   /permissions [mode]  Set permission mode
@@ -48,6 +48,18 @@ Slash commands in REPL:
   /voice            Record voice input, transcribe, and submit
   /voice status     Show available recording and STT backends
   /voice lang <code>  Set STT language (e.g. zh, en, ja — default: auto)
+
+Knowledge commands:
+  /ingest <path>    Ingest a file or directory into the knowledge store
+  /ingest-status    Show compile queue status
+  /docs             List all knowledge articles with summaries
+  /docs <slug>      Display a specific article
+  /search <query>   Search knowledge store with ranked results
+  /compile <slug>   Manually compile a specific article
+  /refresh          Re-probe local models via ModelRouter
+  /cloud <message>  Force cloud model for a single query
+  /stats            Display knowledge store statistics
+
   /exit /quit Exit
 """
 from __future__ import annotations
@@ -591,6 +603,13 @@ def cmd_context(_args: str, state, config) -> bool:
     return True
 
 def cmd_cost(_args: str, state, config) -> bool:
+    # Use CostTracker dashboard if available (knowledge subsystem initialized)
+    kt = config.get("_knowledge_context", {})
+    cost_tracker = kt.get("cost_tracker") if isinstance(kt, dict) else None
+    if cost_tracker is not None and cost_tracker.total_tokens > 0:
+        info(cost_tracker.format_report())
+        return True
+    # Fallback to legacy token accounting
     from saido_agent.core.config import calc_cost
     cost = calc_cost(config["model"],
                      state.total_input_tokens,
@@ -1223,33 +1242,246 @@ def cmd_voice(args: str, state, config) -> bool:
     return ("__voice__", text)
 
 
+# ── Knowledge slash commands ──────────────────────────────────────────────
+
+def _get_kctx(config: dict) -> dict:
+    """Return the knowledge context dict from config, or empty dict."""
+    ctx = config.get("_knowledge_context")
+    return ctx if isinstance(ctx, dict) else {}
+
+
+def cmd_ingest(args: str, _state, config) -> bool:
+    """Ingest a file or directory into the knowledge store."""
+    kctx = _get_kctx(config)
+    pipeline = kctx.get("ingest_pipeline")
+    if pipeline is None:
+        err("Knowledge subsystem not available. SmartRAG may not be installed.")
+        return True
+    path = args.strip()
+    if not path:
+        err("Usage: /ingest <file_or_directory_path>")
+        return True
+    from pathlib import Path as _P
+    target = _P(path)
+    if target.is_dir():
+        results = pipeline.ingest_directory(str(target))
+        ok_count = sum(1 for r in results if r["status"] == "ok")
+        err_count = sum(1 for r in results if r["status"] == "error")
+        info(f"Ingested {ok_count} file(s) from {path}")
+        if err_count:
+            warn(f"{err_count} file(s) had errors")
+        for r in results:
+            status_clr = "green" if r["status"] == "ok" else ("red" if r["status"] == "error" else "dim")
+            print(clr(f"  {r['status']:7s} {r['path']}", status_clr))
+    elif target.is_file():
+        result = pipeline.ingest_file(str(target))
+        if result["status"] == "ok":
+            ok(f"Ingested: {path} -> slug: {result['slug']}")
+        else:
+            err(f"Failed: {result.get('error', 'unknown error')}")
+    else:
+        err(f"Path not found: {path}")
+    return True
+
+
+def cmd_ingest_status(_args: str, _state, config) -> bool:
+    """Show compile queue status."""
+    kctx = _get_kctx(config)
+    pipeline = kctx.get("ingest_pipeline")
+    if pipeline is None:
+        err("Knowledge subsystem not available.")
+        return True
+    queue = pipeline.get_compile_queue()
+    if not queue:
+        info("Compile queue is empty.")
+    else:
+        info(f"Compile queue ({len(queue)} pending):")
+        for slug in queue:
+            print(f"  - {slug}")
+    return True
+
+
+def cmd_docs(args: str, _state, config) -> bool:
+    """List all knowledge articles or display a specific one."""
+    kctx = _get_kctx(config)
+    bridge = kctx.get("bridge")
+    if bridge is None or not bridge.available:
+        err("Knowledge subsystem not available.")
+        return True
+    slug = args.strip()
+    if slug:
+        doc = bridge.read_article(slug)
+        if doc is None:
+            err(f"Article not found: {slug}")
+            return True
+        print(clr(f"\n  === {slug} ===\n", "cyan", "bold"))
+        if _RICH:
+            from rich.markdown import Markdown as _Md
+            console.print(_Md(doc.body))
+        else:
+            print(doc.body)
+        return True
+    # List all articles (paginated at 25)
+    articles = bridge.list_articles()
+    if not articles:
+        info("No articles in the knowledge store. Use /ingest to add files.")
+        return True
+    PAGE = 25
+    info(f"Knowledge articles ({len(articles)} total):")
+    for i, (art_slug, title, summary) in enumerate(articles):
+        if i >= PAGE:
+            info(f"  ... and {len(articles) - PAGE} more (use /docs <slug> to view)")
+            break
+        summary_short = (summary[:80] + "...") if len(summary) > 80 else summary
+        print(f"  {clr(art_slug, 'cyan'):40s} {summary_short}")
+    return True
+
+
+def cmd_search(args: str, _state, config) -> bool:
+    """Search the knowledge store with ranked results."""
+    kctx = _get_kctx(config)
+    qa = kctx.get("knowledge_qa")
+    if qa is None:
+        err("Knowledge subsystem not available.")
+        return True
+    query = args.strip()
+    if not query:
+        err("Usage: /search <query>")
+        return True
+    results = qa.search(query, top_k=10)
+    if not results:
+        info(f"No results for '{query}'")
+        return True
+    info(f"Search results for '{query}' ({len(results)} hits):")
+    for i, r in enumerate(results, 1):
+        score = r.get("score", 0)
+        snippet = r.get("snippet", "")[:100]
+        print(f"  {i}. {clr(r['slug'], 'cyan')}  (score: {score:.2f})")
+        if snippet:
+            print(f"     {clr(snippet, 'dim')}")
+    return True
+
+
+def cmd_compile(args: str, _state, config) -> bool:
+    """Manually compile a specific article."""
+    kctx = _get_kctx(config)
+    compiler = kctx.get("wiki_compiler")
+    bridge = kctx.get("bridge")
+    if compiler is None or bridge is None:
+        err("Knowledge subsystem not available.")
+        return True
+    slug = args.strip()
+    if not slug:
+        err("Usage: /compile <slug>")
+        return True
+    doc = bridge.read_article(slug)
+    if doc is None:
+        err(f"Article not found: {slug}")
+        return True
+    info(f"Compiling {slug}...")
+    try:
+        results = compiler.compile_batch([slug])
+        if results:
+            ok(f"Compiled: {slug}")
+        else:
+            warn(f"Compile returned no results for {slug}")
+    except Exception as e:
+        err(f"Compile failed: {e}")
+    return True
+
+
+def cmd_refresh(_args: str, _state, config) -> bool:
+    """Re-probe local models via ModelRouter."""
+    kctx = _get_kctx(config)
+    router = kctx.get("model_router")
+    if router is None:
+        err("ModelRouter not initialized.")
+        return True
+    info("Probing local providers...")
+    providers = router.refresh()
+    for name, pinfo in providers.items():
+        if pinfo.available:
+            ok(f"  {name}: {len(pinfo.models)} model(s) detected")
+            for m in pinfo.models:
+                print(f"    - {m}")
+        else:
+            print(clr(f"  {name}: not detected", "dim"))
+    return True
+
+
+def cmd_cloud(args: str, state, config) -> bool:
+    """Force cloud model for a single query.
+
+    Returns a sentinel tuple so the REPL main loop routes it as a query.
+    """
+    kctx = _get_kctx(config)
+    router = kctx.get("model_router")
+    message = args.strip()
+    if not message:
+        err("Usage: /cloud <your message>")
+        return True
+    if router is not None:
+        router.set_force_cloud(True)
+    # Return sentinel so repl() sends this as a regular query
+    return ("__cloud__", message)
+
+
+def cmd_stats(_args: str, _state, config) -> bool:
+    """Display knowledge store statistics."""
+    kctx = _get_kctx(config)
+    bridge = kctx.get("bridge")
+    if bridge is None or not bridge.available:
+        err("Knowledge subsystem not available.")
+        return True
+    st = bridge.stats
+    info("Knowledge store statistics:")
+    info(f"  Articles:       {st.get('document_count', 0)}")
+    idx_bytes = st.get("index_size_bytes", 0)
+    if idx_bytes > 0:
+        info(f"  Index size:     {idx_bytes / 1024:.1f} KB")
+    cats = st.get("categories", [])
+    if cats:
+        info(f"  Categories:     {len(cats)}")
+        for c in cats:
+            print(f"    - {c}")
+    return True
+
+
 COMMANDS = {
-    "help":        cmd_help,
-    "clear":       cmd_clear,
-    "model":       cmd_model,
-    "config":      cmd_config,
-    "save":        cmd_save,
-    "load":        cmd_load,
-    "history":     cmd_history,
-    "context":     cmd_context,
-    "cost":        cmd_cost,
-    "verbose":     cmd_verbose,
-    "thinking":    cmd_thinking,
-    "permissions": cmd_permissions,
-    "cwd":         cmd_cwd,
-    "skills":      cmd_skills,
-    "memory":      cmd_memory,
-    "memories":    cmd_memories,
-    "forget":      cmd_forget,
-    "agents":      cmd_agents,
-    "mcp":         cmd_mcp,
-    "plugin":      cmd_plugin,
-    "tasks":       cmd_tasks,
-    "task":        cmd_tasks,
-    "voice":       cmd_voice,
-    "exit":        cmd_exit,
-    "quit":        cmd_exit,
-    "resume":      cmd_resume
+    "help":           cmd_help,
+    "clear":          cmd_clear,
+    "model":          cmd_model,
+    "config":         cmd_config,
+    "save":           cmd_save,
+    "load":           cmd_load,
+    "history":        cmd_history,
+    "context":        cmd_context,
+    "cost":           cmd_cost,
+    "verbose":        cmd_verbose,
+    "thinking":       cmd_thinking,
+    "permissions":    cmd_permissions,
+    "cwd":            cmd_cwd,
+    "skills":         cmd_skills,
+    "memory":         cmd_memory,
+    "memories":       cmd_memories,
+    "forget":         cmd_forget,
+    "agents":         cmd_agents,
+    "mcp":            cmd_mcp,
+    "plugin":         cmd_plugin,
+    "tasks":          cmd_tasks,
+    "task":           cmd_tasks,
+    "voice":          cmd_voice,
+    "ingest":         cmd_ingest,
+    "ingest-status":  cmd_ingest_status,
+    "docs":           cmd_docs,
+    "search":         cmd_search,
+    "compile":        cmd_compile,
+    "refresh":        cmd_refresh,
+    "cloud":          cmd_cloud,
+    "stats":          cmd_stats,
+    "exit":           cmd_exit,
+    "quit":           cmd_exit,
+    "resume":         cmd_resume,
 }
 
 
@@ -1266,7 +1498,7 @@ def handle_slash(line: str, state, config) -> Union[bool, tuple]:
     if handler:
         result = handler(args, state, config)
         # cmd_voice returns ("__voice__", text) to ask the REPL to run_query
-        if isinstance(result, tuple) and result[0] == "__voice__":
+        if isinstance(result, tuple) and result[0] in ("__voice__", "__cloud__"):
             return result
         return True
 
@@ -1303,6 +1535,122 @@ def setup_readline(history_file: Path):
     readline.parse_and_bind("tab: complete")
 
 
+# ── Knowledge subsystem initialization ────────────────────────────────────
+
+def _init_knowledge_context(config: dict) -> dict:
+    """Initialize the knowledge subsystem components.
+
+    Returns a dict with references to bridge, pipeline, compiler, qa, router,
+    and cost_tracker.  Any component that fails to initialize is set to None.
+    """
+    kctx: dict = {
+        "bridge": None,
+        "ingest_pipeline": None,
+        "wiki_compiler": None,
+        "knowledge_qa": None,
+        "model_router": None,
+        "cost_tracker": None,
+    }
+
+    # ModelRouter + CostTracker (always attempted)
+    try:
+        from saido_agent.core.routing import ModelRouter
+        router = ModelRouter()
+        router.probe_local_providers()
+        router.check_internet()
+        kctx["model_router"] = router
+    except Exception:
+        pass
+
+    try:
+        from saido_agent.core.cost_tracker import CostTracker
+        kctx["cost_tracker"] = CostTracker()
+    except Exception:
+        pass
+
+    # Knowledge components (require SmartRAG)
+    try:
+        from saido_agent.knowledge.bridge import KnowledgeBridge, BridgeConfig, SMARTRAG_AVAILABLE
+        if not SMARTRAG_AVAILABLE:
+            return kctx
+        bridge = KnowledgeBridge(BridgeConfig())
+        kctx["bridge"] = bridge
+    except Exception:
+        return kctx
+
+    try:
+        from saido_agent.knowledge.ingest import IngestPipeline
+        kctx["ingest_pipeline"] = IngestPipeline(bridge, model_router=kctx["model_router"])
+    except Exception:
+        pass
+
+    try:
+        from saido_agent.knowledge.compile import WikiCompiler
+        kctx["wiki_compiler"] = WikiCompiler(bridge, model_router=kctx["model_router"])
+    except Exception:
+        pass
+
+    try:
+        from saido_agent.knowledge.query import KnowledgeQA
+        kctx["knowledge_qa"] = KnowledgeQA(bridge, model_router=kctx["model_router"])
+    except Exception:
+        pass
+
+    return kctx
+
+
+def _print_startup_banner(config: dict, kctx: dict) -> None:
+    """Print the branded startup banner with knowledge stats."""
+    from saido_agent.core.providers import detect_provider
+
+    model = config["model"]
+    pname = detect_provider(model)
+
+    # Knowledge stats
+    bridge = kctx.get("bridge")
+    article_count = 0
+    category_count = 0
+    if bridge is not None and bridge.available:
+        st = bridge.stats
+        article_count = st.get("document_count", 0)
+        cats = st.get("categories", [])
+        category_count = len(cats) if isinstance(cats, list) else 0
+
+    # Provider status line
+    router = kctx.get("model_router")
+    if router is not None and router.offline_mode:
+        provider_line = clr("Offline mode -- local models only", "yellow")
+        status_icon = clr("[offline]", "yellow")
+    elif router is not None:
+        local_models = router.get_available_local_models()
+        if local_models:
+            best = router.auto_select_best_local()
+            best_provider, best_model = best if best else local_models[0]
+            provider_line = clr(f"Local: {best_model} via {best_provider.title()}", "green")
+            status_icon = clr("[local]", "green")
+        else:
+            provider_line = clr(f"Cloud only: {pname}/{model}", "yellow")
+            status_icon = clr("[cloud]", "yellow")
+    else:
+        provider_line = clr(f"{model} ({pname})", "cyan")
+        status_icon = ""
+
+    # Print banner
+    print()
+    print(clr(f"Saido Agent v{VERSION}", "cyan", "bold") + clr(" -- Knowledge-Compounding AI Agent", "dim"))
+    if article_count > 0:
+        print(clr(f"{article_count} articles | {category_count} categories | Provider: {pname} ({model})", "dim"))
+    else:
+        print(clr(f"Provider: {pname} ({model})", "dim"))
+    print(f"{status_icon} {provider_line}")
+
+    # SmartRAG availability warning
+    if bridge is None or not bridge.available:
+        print(clr("Knowledge commands disabled (SmartRAG not installed)", "yellow"))
+
+    print()
+
+
 # ── Main REPL ──────────────────────────────────────────────────────────────
 
 def repl(config: dict, initial_prompt: str = None):
@@ -1320,20 +1668,13 @@ def repl(config: dict, initial_prompt: str = None):
     except Exception:
         pass
 
-    # Banner
+    # ── Initialize knowledge subsystem ────────────────────────────────
+    kctx = _init_knowledge_context(config)
+    config["_knowledge_context"] = kctx
+
+    # ── Banner ────────────────────────────────────────────────────────
     if not initial_prompt:
-        from saido_agent.core.providers import detect_provider
-        model    = config["model"]
-        pname    = detect_provider(model)
-        model_clr = clr(model, "cyan", "bold")
-        prov_clr  = clr(f"({pname})", "dim")
-        pmode     = clr(config.get("permission_mode", "auto"), "yellow")
-        print(clr("╭─ Saido Agent ──────────────────────────────╮", "dim"))
-        print(clr("│  Model: ", "dim") + model_clr + " " + prov_clr)
-        print(clr("│  Permissions: ", "dim") + pmode)
-        print(clr("│  /model to switch provider · /help for commands │", "dim"))
-        print(clr("╰──────────────────────────────────────────────────╯", "dim"))
-        print()
+        _print_startup_banner(config, kctx)
 
     def run_query(user_input: str):
         nonlocal verbose
@@ -1434,6 +1775,15 @@ def repl(config: dict, initial_prompt: str = None):
                 _, voice_text = result
                 try:
                     run_query(voice_text)
+                    _maybe_autosave()
+                except KeyboardInterrupt:
+                    print(clr("\n  (interrupted)", "yellow"))
+                continue
+            # Cloud sentinel: ("__cloud__", message)
+            if result[0] == "__cloud__":
+                _, cloud_text = result
+                try:
+                    run_query(cloud_text)
                     _maybe_autosave()
                 except KeyboardInterrupt:
                     print(clr("\n  (interrupted)", "yellow"))
