@@ -190,6 +190,28 @@ class IngestPipeline:
         """Clear the compile queue (after handing off to compile agent)."""
         self._compile_queue.clear()
 
+    def process_compile_queue(self, compiler, progress_callback=None) -> list:
+        """Run the WikiCompiler over all queued slugs, then clear the queue.
+
+        Args:
+            compiler: A ``WikiCompiler`` instance (or any object with a
+                ``compile_batch(slugs, progress_callback)`` method).
+            progress_callback: Optional callback(current, total, title).
+
+        Returns:
+            List of ``CompileResult`` objects from the compiler.
+        """
+        if not self._compile_queue:
+            log.info("Compile queue is empty -- nothing to process")
+            return []
+
+        slugs = list(self._compile_queue)
+        log.info("Processing compile queue: %d slugs", len(slugs))
+
+        results = compiler.compile_batch(slugs, progress_callback=progress_callback)
+        self._compile_queue.clear()
+        return results
+
     # -- static helpers -----------------------------------------------------
 
     @staticmethod
