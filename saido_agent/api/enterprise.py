@@ -424,10 +424,14 @@ class SSOManager:
         self, tenant_id: str, issuer: str, client_id: str, client_secret: str
     ) -> dict:
         """Configure OIDC SSO."""
+        # P4-HIGH-2: Hash the client_secret before storage (never store plaintext)
+        import hashlib
+        secret_hash = hashlib.sha256(client_secret.encode()).hexdigest()
         config = {
             "issuer": issuer,
             "client_id": client_id,
-            "client_secret": client_secret,
+            "client_secret_hash": secret_hash,
+            "_secret_stored": "hashed_sha256",
         }
         conn = self._conn()
         try:
@@ -471,6 +475,9 @@ class SSOManager:
         .. note:: This is a mock implementation. Production use requires
            ``python3-saml`` for real XML signature validation.
         """
+        # P4-HIGH-1: Mock validators only work when explicitly enabled
+        if not os.environ.get("SAIDO_SSO_MOCK_ENABLED"):
+            return {"valid": False, "error": "SSO mock disabled. Set SAIDO_SSO_MOCK_ENABLED=1 for testing, or install python3-saml for production."}
         # Mock: decode a simple JSON payload for testing
         try:
             payload = json.loads(saml_response)
@@ -490,6 +497,9 @@ class SSOManager:
         .. note:: This is a mock implementation. Production use requires
            ``python-jose`` for real JWT/JWK validation against the IdP.
         """
+        # P4-HIGH-1: Mock validators only work when explicitly enabled
+        if not os.environ.get("SAIDO_SSO_MOCK_ENABLED"):
+            return {"valid": False, "error": "SSO mock disabled. Set SAIDO_SSO_MOCK_ENABLED=1 for testing, or install python-jose for production."}
         try:
             payload = json.loads(id_token)
             return {

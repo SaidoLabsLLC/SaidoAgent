@@ -230,8 +230,12 @@ class PluginMarketplace:
         else:
             result.status = "pending_review"
 
-        # Copy plugin to packages directory
-        dest = self._packages_dir / manifest.name
+        # P4-MED-2: Sanitize plugin name to prevent path traversal
+        import re
+        safe_name = re.sub(r'[^a-zA-Z0-9_\-]', '_', manifest.name)
+        if safe_name != manifest.name:
+            logger.warning("Plugin name sanitized: %r -> %r", manifest.name, safe_name)
+        dest = self._packages_dir / safe_name
         if dest.exists():
             shutil.rmtree(dest)
         shutil.copytree(str(plugin_path), str(dest))

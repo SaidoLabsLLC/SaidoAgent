@@ -187,7 +187,15 @@ class FinetuneManager:
         If the OpenAI SDK is not available or not configured, the job is
         created in PENDING status so the user can retry later.
         """
-        path = Path(training_file)
+        path = Path(training_file).resolve()
+        # P4-MED-1: Validate training file is under config_dir's parent (tenant workspace)
+        allowed_root = self._config_dir.resolve().parent
+        try:
+            path.relative_to(allowed_root)
+        except ValueError:
+            raise ValueError(
+                f"Training file must be under {allowed_root}, got {path}"
+            )
         _validate_jsonl(path)
 
         job_id = f"ft-{uuid.uuid4().hex[:12]}"

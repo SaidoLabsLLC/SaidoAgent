@@ -210,15 +210,15 @@ async def record_consent(
 
 
 @sso_router.post("/sso/saml/config")
-async def configure_saml(body: SAMLConfigRequest):
-    """Configure SAML 2.0 SSO for a tenant."""
+async def configure_saml(body: SAMLConfigRequest, tenant: str = Depends(get_current_tenant)):
+    """Configure SAML 2.0 SSO for a tenant. Requires authentication."""
     sso = get_sso_manager()
     return sso.configure_saml(body.tenant_id, body.idp_metadata_url, body.entity_id)
 
 
 @sso_router.post("/sso/oidc/config")
-async def configure_oidc(body: OIDCConfigRequest):
-    """Configure OIDC SSO for a tenant."""
+async def configure_oidc(body: OIDCConfigRequest, tenant: str = Depends(get_current_tenant)):
+    """Configure OIDC SSO for a tenant. Requires authentication."""
     sso = get_sso_manager()
     return sso.configure_oidc(body.tenant_id, body.issuer, body.client_id, body.client_secret)
 

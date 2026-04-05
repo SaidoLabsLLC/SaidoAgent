@@ -344,6 +344,10 @@ class TestDataCompliance:
 class TestSSO:
     """Test SSO configuration and validation."""
 
+    @pytest.fixture(autouse=True)
+    def _enable_sso_mock(self, monkeypatch):
+        monkeypatch.setenv("SAIDO_SSO_MOCK_ENABLED", "1")
+
     def test_configure_saml(self, sso_manager):
         """SAML configuration is stored successfully."""
         result = sso_manager.configure_saml(
@@ -563,6 +567,10 @@ class TestComplianceAPI:
 
 class TestSSOAPI:
     """Test SSO API endpoints."""
+
+    @pytest.fixture(autouse=True)
+    def _enable_sso_mock(self, monkeypatch):
+        monkeypatch.setenv("SAIDO_SSO_MOCK_ENABLED", "1")
 
     def test_saml_login(self, client):
         """POST /v1/auth/sso/saml authenticates via SAML."""
