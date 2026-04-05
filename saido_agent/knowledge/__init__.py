@@ -6,10 +6,12 @@ from saido_agent.knowledge.bridge import (
     BridgeConfig,
     KnowledgeBridge,
 )
+from saido_agent.knowledge.grounding import KnowledgeGrounder
 
 __all__ = [
     "BridgeConfig",
     "HAS_EMBEDDINGS",
     "KnowledgeBridge",
+    "KnowledgeGrounder",
     "SMARTRAG_AVAILABLE",
 ]

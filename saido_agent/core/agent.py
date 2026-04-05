@@ -76,6 +76,16 @@ def run(
 
     config = {**config, "_depth": depth, "_system_prompt": system_prompt}
 
+    # -- Knowledge auto-grounding (per-turn, non-cumulative) --
+    grounder = config.get("_knowledge_grounder")
+    if grounder:
+        try:
+            knowledge_context = grounder.ground(user_message)
+            if knowledge_context:
+                system_prompt = system_prompt + "\n" + knowledge_context
+        except Exception:
+            logger.debug("Knowledge grounding failed, proceeding without context")
+
     # Resolve model via routing if a router is attached to state
     resolved_model = config["model"]
     resolved_provider = None

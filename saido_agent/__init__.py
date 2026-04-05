@@ -125,6 +125,11 @@ class SaidoAgent:
             model_router=self._router,
         )
 
+        # 7. KnowledgeGrounder (auto-grounding for agent loop)
+        from saido_agent.knowledge.grounding import KnowledgeGrounder
+
+        self._grounder = KnowledgeGrounder(bridge=self._bridge)
+
         logger.info(
             "SaidoAgent initialized (knowledge_dir=%s, bridge_available=%s)",
             self._knowledge_dir,
@@ -388,6 +393,11 @@ class SaidoAgent:
     def cost_tracker(self) -> Any:
         """Access the underlying CostTracker (advanced use)."""
         return self._cost_tracker
+
+    @property
+    def grounder(self) -> Any:
+        """Access the underlying KnowledgeGrounder (advanced use)."""
+        return self._grounder
 
     # ------------------------------------------------------------------
     # Public API -- Voice Pipeline

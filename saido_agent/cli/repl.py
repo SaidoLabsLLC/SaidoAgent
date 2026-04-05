@@ -2086,6 +2086,37 @@ def cmd_export(args: str, _state, config) -> bool:
     return True
 
 
+def cmd_grounding(args: str, _state, config) -> bool:
+    """Toggle or show knowledge auto-grounding status."""
+    subcmd = args.strip().lower()
+    grounder = config.get("_knowledge_grounder")
+
+    if subcmd == "on":
+        if grounder:
+            grounder.enabled = True
+            ok("Knowledge auto-grounding enabled.")
+        else:
+            warn("No knowledge grounder initialized (knowledge subsystem unavailable).")
+    elif subcmd == "off":
+        if grounder:
+            grounder.enabled = False
+            ok("Knowledge auto-grounding disabled.")
+        else:
+            warn("No knowledge grounder initialized.")
+    elif subcmd == "status" or subcmd == "":
+        if grounder:
+            state_str = "enabled" if grounder.enabled else "disabled"
+            info(f"Knowledge auto-grounding: {state_str}")
+            info(f"  top_k: {grounder._top_k}")
+            info(f"  max_context_chars: {grounder._max_context_chars}")
+            info(f"  min_relevance_score: {grounder._min_relevance_score}")
+        else:
+            info("Knowledge auto-grounding: not initialized (knowledge subsystem unavailable)")
+    else:
+        err("Usage: /grounding [on|off|status]")
+    return True
+
+
 COMMANDS = {
     "help":           cmd_help,
     "clear":          cmd_clear,
@@ -2134,6 +2165,7 @@ COMMANDS = {
     "mcp-auto":       cmd_mcp_auto,
     "report":         cmd_report,
     "export":         cmd_export,
+    "grounding":      cmd_grounding,
 }
 
 
@@ -2259,6 +2291,15 @@ def _init_knowledge_context(config: dict) -> dict:
     try:
         from saido_agent.knowledge.index import WikiIndexer
         kctx["wiki_indexer"] = WikiIndexer(bridge, model_router=kctx["model_router"])
+    except Exception:
+        pass
+
+    # Knowledge auto-grounding
+    try:
+        from saido_agent.knowledge.grounding import KnowledgeGrounder
+        grounder = KnowledgeGrounder(bridge, config)
+        kctx["grounder"] = grounder
+        config["_knowledge_grounder"] = grounder
     except Exception:
         pass
 
