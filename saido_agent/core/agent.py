@@ -1,6 +1,7 @@
 """Core agent loop: neutral message format, multi-provider streaming."""
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass, field
 from typing import Generator
@@ -10,6 +11,10 @@ from saido_agent.core.tools import execute_tool
 import saido_agent.core.tools as _tools_init  # ensure built-in tools are registered on import
 from saido_agent.core.providers import stream, AssistantTurn, TextChunk, ThinkingChunk, detect_provider
 from saido_agent.core.compaction import maybe_compact
+from saido_agent.core.routing import ModelRouter
+from saido_agent.core.cost_tracker import CostTracker
+
+logger = logging.getLogger(__name__)
 
 # -- Re-export event types (used by cli/repl.py) --
 __all__ = [
@@ -26,6 +31,8 @@ class AgentState:
     total_input_tokens:  int = 0
     total_output_tokens: int = 0
     turn_count: int = 0
+    router: ModelRouter | None = None
+    cost_tracker: CostTracker = field(default_factory=CostTracker)
 
 
 @dataclass
@@ -69,6 +76,20 @@ def run(
 
     config = {**config, "_depth": depth, "_system_prompt": system_prompt}
 
+    # Resolve model via routing if a router is attached to state
+    resolved_model = config["model"]
+    resolved_provider = None
+    task_type = config.get("_task_type", "")
+    if state.router and task_type:
+        try:
+            resolved_provider, resolved_model = state.router.select_model(task_type)
+            logger.debug(
+                "Router selected %s/%s for task %r",
+                resolved_provider, resolved_model, task_type,
+            )
+        except Exception:
+            logger.debug("Router selection failed, using config model")
+
     while True:
         if cancel_check and cancel_check():
             return
@@ -77,8 +98,13 @@ def run(
 
         maybe_compact(state, config)
 
+        # Use provider-prefixed model if router resolved to a specific provider
+        stream_model = resolved_model
+        if resolved_provider and "/" not in resolved_model:
+            stream_model = f"{resolved_provider}/{resolved_model}"
+
         for event in stream(
-            model=config["model"],
+            model=stream_model,
             system=system_prompt,
             messages=state.messages,
             tool_schemas=get_tool_schemas(),
@@ -100,6 +126,14 @@ def run(
 
         state.total_input_tokens  += assistant_turn.in_tokens
         state.total_output_tokens += assistant_turn.out_tokens
+
+        # Track costs if router is active
+        provider_for_cost = resolved_provider or detect_provider(config["model"])
+        state.cost_tracker.record(
+            provider_for_cost, resolved_model,
+            assistant_turn.in_tokens, assistant_turn.out_tokens,
+        )
+
         yield TurnDone(assistant_turn.in_tokens, assistant_turn.out_tokens)
 
         if not assistant_turn.tool_calls:

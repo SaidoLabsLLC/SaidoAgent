@@ -1,17 +1,107 @@
-"""MCP client: stdio and HTTP/SSE transports, JSON-RPC 2.0 protocol."""
+"""MCP client: stdio and HTTP/SSE transports, JSON-RPC 2.0 protocol.
+
+HIGH-2 Security Fix: MCP server commands require explicit user approval on
+first run.  Approved commands are persisted in ~/.saido_agent/mcp_approved.json.
+Commands containing shell metacharacters are rejected outright.
+"""
 from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
 
 from .types import (
     MCPServerConfig, MCPServerState, MCPTool, MCPTransport,
     INIT_PARAMS, make_notification, make_request,
 )
+
+
+# ── MCP command approval system ──────────────────────────────────────────────
+
+_SHELL_METACHAR_RE = re.compile(r"[;|&$`]|\|\||&&|\$\(")
+
+_MCP_APPROVED_FILE = Path.home() / ".saido_agent" / "mcp_approved.json"
+
+
+def _load_approved_commands() -> list:
+    """Load the list of previously approved MCP commands."""
+    if _MCP_APPROVED_FILE.exists():
+        try:
+            return json.loads(_MCP_APPROVED_FILE.read_text())
+        except Exception:
+            return []
+    return []
+
+
+def _save_approved_commands(approved: list) -> None:
+    _MCP_APPROVED_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _MCP_APPROVED_FILE.write_text(json.dumps(approved, indent=2))
+
+
+def _command_string(config: MCPServerConfig) -> str:
+    """Build the full command string for display and approval lookup."""
+    parts = [config.command] + list(config.args or [])
+    return " ".join(parts)
+
+
+def validate_mcp_command(config: MCPServerConfig) -> str | None:
+    """Validate an MCP command for shell injection.
+
+    Returns an error string if invalid, None if OK.
+    """
+    full_cmd = _command_string(config)
+    if _SHELL_METACHAR_RE.search(full_cmd):
+        return (
+            f"MCP command contains shell metacharacters and was rejected: {full_cmd}\n"
+            f"Characters like ; && || | $() and backticks are not allowed."
+        )
+    return None
+
+
+def check_mcp_approval(
+    config: MCPServerConfig,
+    prompt_fn: Optional[Callable[[str], bool]] = None,
+) -> bool:
+    """Check if an MCP server command is approved.
+
+    On first run, prompts the user for approval (if prompt_fn is provided).
+    Returns True if approved, False if rejected.
+    """
+    full_cmd = _command_string(config)
+
+    # Reject metacharacters unconditionally
+    error = validate_mcp_command(config)
+    if error:
+        raise SecurityError(error)
+
+    approved = _load_approved_commands()
+    if full_cmd in approved:
+        return True
+
+    # No prompt function = non-interactive, reject unapproved
+    if prompt_fn is None:
+        return False
+
+    # Interactive approval
+    granted = prompt_fn(
+        f"MCP server '{config.name}' wants to run: {full_cmd}\nAllow? [y/N]"
+    )
+    if granted:
+        approved.append(full_cmd)
+        _save_approved_commands(approved)
+        return True
+
+    return False
+
+
+class SecurityError(Exception):
+    """Raised when an MCP command fails security validation."""
+    pass
 
 
 # ── Stdio transport ───────────────────────────────────────────────────────────
@@ -286,7 +376,8 @@ class MCPClient:
         disconnect() → cleanup
     """
 
-    def __init__(self, config: MCPServerConfig):
+    def __init__(self, config: MCPServerConfig,
+                 prompt_fn: Optional[Callable[[str], bool]] = None):
         self.config = config
         self.state = MCPServerState.DISCONNECTED
         self._transport: Optional[Any] = None
@@ -294,6 +385,7 @@ class MCPClient:
         self._capabilities: dict = {}
         self._tools: List[MCPTool] = []
         self._error: str = ""
+        self._prompt_fn = prompt_fn
 
     # ── Connection ────────────────────────────────────────────────────────────
 
@@ -303,6 +395,12 @@ class MCPClient:
         self.state = MCPServerState.CONNECTING
         self._error = ""
         try:
+            # HIGH-2: Validate and require approval for stdio commands
+            if self.config.transport == MCPTransport.STDIO:
+                if not check_mcp_approval(self.config, self._prompt_fn):
+                    raise SecurityError(
+                        f"MCP command not approved: {_command_string(self.config)}"
+                    )
             self._transport = self._make_transport()
             self._transport.start()
             self._handshake()
@@ -443,8 +541,9 @@ class MCPClient:
 class MCPManager:
     """Singleton that manages all configured MCP server connections."""
 
-    def __init__(self):
+    def __init__(self, prompt_fn: Optional[Callable[[str], bool]] = None):
         self._clients: Dict[str, MCPClient] = {}
+        self._prompt_fn = prompt_fn
 
     def add_server(self, config: MCPServerConfig) -> MCPClient:
         """Register a server. Replaces any existing client with the same name."""
@@ -453,7 +552,7 @@ class MCPManager:
                 self._clients[config.name].disconnect()
             except Exception:
                 pass
-        client = MCPClient(config)
+        client = MCPClient(config, prompt_fn=self._prompt_fn)
         self._clients[config.name] = client
         return client
 

@@ -1,10 +1,9 @@
 """Plugin loader: discover and load tools/skills/mcp from installed plugins."""
 from __future__ import annotations
 
-import importlib.util
-import sys
 from pathlib import Path
 
+from .sandbox import sandboxed_import_plugin_module
 from .store import list_plugins
 from .types import PluginEntry, PluginScope
 
@@ -18,13 +17,16 @@ def load_plugin_tools(scope: PluginScope | None = None) -> list[dict]:
     """
     Import tool modules from all enabled plugins and collect their TOOL_SCHEMAS.
     Returns combined list of tool schema dicts.
+
+    All module loading goes through the sandbox, which blocks dangerous imports
+    unless explicitly declared in the plugin manifest.
     """
     schemas: list[dict] = []
     for entry in load_all_plugins(scope):
         if not entry.manifest or not entry.manifest.tools:
             continue
         for module_name in entry.manifest.tools:
-            mod = _import_plugin_module(entry, module_name)
+            mod = sandboxed_import_plugin_module(entry, module_name)
             if mod and hasattr(mod, "TOOL_SCHEMAS"):
                 schemas.extend(mod.TOOL_SCHEMAS)
     return schemas
@@ -34,6 +36,9 @@ def register_plugin_tools(scope: PluginScope | None = None) -> int:
     """
     Import tool modules from enabled plugins and register them into tool_registry.
     Returns number of tools registered.
+
+    All module loading goes through the sandbox, which blocks dangerous imports
+    unless explicitly declared in the plugin manifest.
     """
     from saido_agent.core.tool_registry import register_tool, ToolDef
     count = 0
@@ -41,7 +46,7 @@ def register_plugin_tools(scope: PluginScope | None = None) -> int:
         if not entry.manifest or not entry.manifest.tools:
             continue
         for module_name in entry.manifest.tools:
-            mod = _import_plugin_module(entry, module_name)
+            mod = sandboxed_import_plugin_module(entry, module_name)
             if mod is None:
                 continue
             # Register each ToolDef exported by the module
@@ -76,35 +81,3 @@ def load_plugin_mcp_configs(scope: PluginScope | None = None) -> dict:
             qualified = f"{entry.name}__{server_name}"
             configs[qualified] = server_cfg
     return configs
-
-
-def _import_plugin_module(entry: PluginEntry, module_name: str):
-    """Dynamically import a module from a plugin directory."""
-    # Ensure plugin dir is on sys.path
-    plugin_dir_str = str(entry.install_dir)
-    if plugin_dir_str not in sys.path:
-        sys.path.insert(0, plugin_dir_str)
-
-    # Build a unique module name to avoid collisions
-    unique_name = f"_plugin_{entry.name}_{module_name}"
-    if unique_name in sys.modules:
-        return sys.modules[unique_name]
-
-    # Try as a file
-    candidates = [
-        entry.install_dir / f"{module_name}.py",
-        entry.install_dir / module_name / "__init__.py",
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            spec = importlib.util.spec_from_file_location(unique_name, candidate)
-            if spec and spec.loader:
-                mod = importlib.util.module_from_spec(spec)
-                sys.modules[unique_name] = mod
-                try:
-                    spec.loader.exec_module(mod)
-                    return mod
-                except Exception as e:
-                    print(f"[plugin] Failed to load {module_name} from {entry.name}: {e}")
-                    del sys.modules[unique_name]
-    return None

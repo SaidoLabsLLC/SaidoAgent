@@ -53,8 +53,10 @@ Slash commands in REPL:
 from __future__ import annotations
 
 import os
+import re
 import sys
 import json
+import time
 try:
     import readline
 except ImportError:
@@ -65,6 +67,9 @@ import textwrap
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Union
+
+import keyring
+from cryptography.fernet import Fernet
 
 # ── Optional rich for markdown rendering ──────────────────────────────────
 try:
@@ -80,6 +85,76 @@ except ImportError:
     console = None
 
 VERSION = "0.1.0"
+
+# ── HIGH-3: Session encryption helpers ───────────────────────────────────────
+
+_SESSION_KEYRING_SERVICE = "saido_agent"
+_SESSION_KEYRING_KEY = "saido_agent_session_key"
+_SECRET_PATTERN = re.compile(
+    r"(sk-ant-[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]{20,}|key-[A-Za-z0-9_-]{20,})"
+)
+_SESSION_EXPIRY_DAYS = 30
+
+
+def _get_session_fernet() -> Fernet:
+    """Get or create a Fernet key for session encryption, stored in keyring."""
+    key = None
+    try:
+        key = keyring.get_password(_SESSION_KEYRING_SERVICE, _SESSION_KEYRING_KEY)
+    except Exception:
+        pass
+    if not key:
+        key = Fernet.generate_key().decode()
+        try:
+            keyring.set_password(_SESSION_KEYRING_SERVICE, _SESSION_KEYRING_KEY, key)
+        except Exception:
+            pass  # Fall through — key lives in memory only this session
+    return Fernet(key.encode() if isinstance(key, str) else key)
+
+
+def _redact_secrets(text: str) -> str:
+    """Redact API key patterns from text before saving to session."""
+    return _SECRET_PATTERN.sub("[REDACTED]", text)
+
+
+def _redact_session_data(data: dict) -> dict:
+    """Deep-redact secrets from session data."""
+    return json.loads(_redact_secrets(json.dumps(data, default=str)))
+
+
+def _encrypt_session(data: dict) -> bytes:
+    """Encrypt session data dict to bytes."""
+    fernet = _get_session_fernet()
+    redacted = _redact_session_data(data)
+    return fernet.encrypt(json.dumps(redacted, default=str).encode("utf-8"))
+
+
+def _decrypt_session(raw: bytes) -> dict:
+    """Decrypt session data from bytes."""
+    fernet = _get_session_fernet()
+    return json.loads(fernet.decrypt(raw).decode("utf-8"))
+
+
+def _cleanup_expired_sessions() -> None:
+    """Delete session files older than _SESSION_EXPIRY_DAYS."""
+    from saido_agent.core.config import SESSIONS_DIR
+    if not SESSIONS_DIR.exists():
+        return
+    cutoff = time.time() - (_SESSION_EXPIRY_DAYS * 86400)
+    for p in SESSIONS_DIR.glob("*.enc"):
+        try:
+            if p.stat().st_mtime < cutoff:
+                p.unlink()
+        except Exception:
+            pass
+    # Also clean up legacy .json sessions
+    for p in SESSIONS_DIR.glob("session_*.json"):
+        try:
+            if p.stat().st_mtime < cutoff:
+                p.unlink()
+        except Exception:
+            pass
+
 
 # ── ANSI helpers (used even with rich for non-markdown output) ─────────────
 C = {
@@ -281,7 +356,10 @@ def cmd_config(args: str, _state, config) -> bool:
 
 def cmd_save(args: str, state, _config) -> bool:
     from saido_agent.core.config import SESSIONS_DIR
-    fname = args.strip() or f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    fname = args.strip() or f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.enc"
+    # Ensure encrypted extension
+    if fname.endswith(".json"):
+        fname = fname[:-5] + ".enc"
     path = Path(fname) if "/" in fname else SESSIONS_DIR / fname
     data = {
         "messages": [
@@ -296,14 +374,14 @@ def cmd_save(args: str, state, _config) -> bool:
         "total_input_tokens": state.total_input_tokens,
         "total_output_tokens": state.total_output_tokens,
     }
-    path.write_text(json.dumps(data, indent=2, default=str))
-    ok(f"Session saved to {path}")
+    path.write_bytes(_encrypt_session(data))
+    ok(f"Session saved (encrypted) to {path}")
     return True
 
 def save_latest(args: str, state, _config) -> bool:
     from saido_agent.core.config import MR_SESSION_DIR
-    fname = "session_latest.json"
-    path = Path(fname) if "/" in fname else MR_SESSION_DIR / fname
+    fname = "session_latest.enc"
+    path = MR_SESSION_DIR / fname
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {
         "messages": [
@@ -318,14 +396,16 @@ def save_latest(args: str, state, _config) -> bool:
         "total_input_tokens": state.total_input_tokens,
         "total_output_tokens": state.total_output_tokens,
     }
-    path.write_text(json.dumps(data, indent=2, default=str))
-    ok(f"Session saved to {path}")
+    path.write_bytes(_encrypt_session(data))
+    ok(f"Session saved (encrypted) to {path}")
     return True
 def cmd_load(args: str, state, _config) -> bool:
     from saido_agent.core.config import SESSIONS_DIR
     if not args.strip():
-        # List available sessions
-        sessions = sorted(SESSIONS_DIR.glob("*.json"))
+        # List available sessions (encrypted and legacy)
+        sessions = sorted(
+            list(SESSIONS_DIR.glob("*.enc")) + list(SESSIONS_DIR.glob("*.json"))
+        )
         if not sessions:
             info("No saved sessions found.")
         else:
@@ -338,7 +418,15 @@ def cmd_load(args: str, state, _config) -> bool:
     if not path.exists():
         err(f"File not found: {path}")
         return True
-    data = json.loads(path.read_text())
+    # Support both encrypted (.enc) and legacy plaintext (.json)
+    if path.suffix == ".enc":
+        try:
+            data = _decrypt_session(path.read_bytes())
+        except Exception as e:
+            err(f"Failed to decrypt session: {e}")
+            return True
+    else:
+        data = json.loads(path.read_text())
     state.messages = data.get("messages", [])
     state.turn_count = data.get("turn_count", 0)
     state.total_input_tokens = data.get("total_input_tokens", 0)
@@ -350,7 +438,10 @@ def cmd_resume(args: str, state, _config) -> bool:
     from saido_agent.core.config import MR_SESSION_DIR
 
     if not args.strip():
-        path = MR_SESSION_DIR / "session_latest.json"
+        # Try encrypted first, then legacy
+        path = MR_SESSION_DIR / "session_latest.enc"
+        if not path.exists():
+            path = MR_SESSION_DIR / "session_latest.json"
         if not path.exists():
             info("No auto-saved sessions found.")
             return True
@@ -362,7 +453,14 @@ def cmd_resume(args: str, state, _config) -> bool:
         err(f"File not found: {path}")
         return True
 
-    data = json.loads(path.read_text())
+    if path.suffix == ".enc":
+        try:
+            data = _decrypt_session(path.read_bytes())
+        except Exception as e:
+            err(f"Failed to decrypt session: {e}")
+            return True
+    else:
+        data = json.loads(path.read_text())
     state.messages = data.get("messages", [])
     state.turn_count = data.get("turn_count", 0)
     state.total_input_tokens = data.get("total_input_tokens", 0)
@@ -1087,6 +1185,12 @@ def repl(config: dict, initial_prompt: str = None):
     setup_readline(HISTORY_FILE)
     state = AgentState()
     verbose = config.get("verbose", False)
+
+    # HIGH-3: Clean up expired sessions on startup
+    try:
+        _cleanup_expired_sessions()
+    except Exception:
+        pass
 
     # Banner
     if not initial_prompt:

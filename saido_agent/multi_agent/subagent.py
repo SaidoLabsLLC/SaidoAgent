@@ -1,7 +1,13 @@
-"""Threaded sub-agent system for spawning nested agent loops."""
+"""Threaded sub-agent system for spawning nested agent loops.
+
+HIGH-4 Security Fix: Removed all os.chdir() calls to prevent thread-safety
+race conditions. Sub-agents receive their working directory as a parameter
+and pass it to subprocess.run(cwd=...) instead.
+"""
 from __future__ import annotations
 
 import os
+import threading
 import uuid
 import queue
 import subprocess
@@ -10,6 +16,34 @@ from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Any
+
+
+# ── HIGH-4: Thread-safety guard against os.chdir() ──────────────────────────
+
+_original_chdir = os.chdir
+
+
+def _safe_chdir(path):
+    """Replacement for os.chdir that raises RuntimeError from non-main threads.
+
+    This prevents thread-safety race conditions where concurrent sub-agents
+    could corrupt each other's working directory.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        raise RuntimeError(
+            f"os.chdir() called from non-main thread '{threading.current_thread().name}'. "
+            f"Use subprocess.run(cwd=target_dir) instead to avoid race conditions."
+        )
+    return _original_chdir(path)
+
+
+def install_chdir_guard():
+    """Install the thread-safe os.chdir guard. Called once at module load."""
+    os.chdir = _safe_chdir
+
+
+# Install guard on import
+install_chdir_guard()
 
 
 @dataclass
@@ -265,13 +299,14 @@ class SubAgentManager:
                 task.result = f"Failed to create worktree: {e}"
                 return task
 
+        # HIGH-4: Pass working dir as config param instead of os.chdir()
+        working_dir = worktree_path or base_dir
+        eff_config["_working_dir"] = working_dir
+
         def _run():
             from saido_agent.core.agent import AgentState
             task.status = "running"
-            old_cwd = os.getcwd()
             try:
-                if worktree_path:
-                    os.chdir(worktree_path)
                 state = AgentState()
                 gen = _agent_run(prompt, state, eff_config, eff_system, depth=depth + 1, cancel_check=lambda: task._cancel_flag)
                 for _event in gen:
@@ -298,8 +333,7 @@ class SubAgentManager:
                 task.result = f"Error: {e}"
             finally:
                 if worktree_path:
-                    os.chdir(old_cwd)
-                    _remove_worktree(worktree_path, worktree_branch, old_cwd)
+                    _remove_worktree(worktree_path, worktree_branch, base_dir)
 
         task._future = self._pool.submit(_run)
         return task

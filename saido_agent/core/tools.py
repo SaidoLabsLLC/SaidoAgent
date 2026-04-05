@@ -4,13 +4,16 @@ import os
 import re
 import glob as _glob
 import difflib
+import shlex
 import subprocess
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
 from saido_agent.core.tool_registry import ToolDef, register_tool
 from saido_agent.core.tool_registry import execute_tool as _registry_execute
+from saido_agent.core.permissions import PathSandboxError, get_sandbox
 
 # -- AskUserQuestion state --
 _pending_questions: list[dict] = []
@@ -325,24 +328,214 @@ TOOL_SCHEMAS = [
     },
 ]
 
-# -- Safe bash commands (never ask permission) --
+# -- Shell execution security --
 
-_SAFE_PREFIXES = (
-    "ls", "cat", "head", "tail", "wc", "pwd", "echo", "printf", "date",
-    "which", "type", "env", "printenv", "uname", "whoami", "id",
-    "git log", "git status", "git diff", "git show", "git branch",
-    "git remote", "git stash list", "git tag",
-    "find ", "grep ", "rg ", "ag ", "fd ",
-    "python ", "python3 ", "node ", "ruby ", "perl ",
-    "pip show", "pip list", "npm list", "cargo metadata",
-    "df ", "du ", "free ", "top -bn", "ps ",
-    "curl -I", "curl --head",
-    "sg ",  # ast-grep is read-only by default
+_SAIDO_DIR = Path.home() / ".saido_agent"
+_AUDIT_LOG = _SAIDO_DIR / "audit.log"
+_BLOCKLIST_FILE = _SAIDO_DIR / "command_blocklist.json"
+
+# Safe binary allowlist -- NO interpreters (python, node, bash, sh, powershell)
+_SAFE_BINARIES = frozenset({
+    "git", "ls", "cat", "head", "tail", "wc", "find", "grep", "rg", "sg",
+    "mkdir", "cp", "mv", "echo", "pip", "npm", "cargo", "make", "docker",
+    "curl", "wget", "touch", "chmod", "diff", "sort", "uniq", "tee",
+    "which", "env", "pwd", "date", "whoami", "hostname", "df", "du",
+    "tree", "zip", "unzip", "tar", "gzip", "printf", "printenv", "uname",
+    "id", "ag", "fd", "free", "top", "ps",
+})
+
+# Dangerous interpreters that require explicit permission
+_BLOCKED_INTERPRETERS = frozenset({
+    "python", "python3", "python3.10", "python3.11", "python3.12", "python3.13",
+    "node", "nodejs", "deno", "bun",
+    "bash", "sh", "zsh", "fish", "csh", "tcsh",
+    "powershell", "pwsh", "cmd",
+    "ruby", "perl", "php", "lua",
+})
+
+# Shell metacharacters that indicate chaining/injection
+_SHELL_METACHAR_PATTERN = re.compile(r'[;|&`]|\$\(')
+
+# Sensitive paths that must not be targeted
+_SENSITIVE_PATHS = (
+    "/etc/", "~/.ssh/", "~/.aws/", "~/.gnupg/",
+    "~/.saido_agent/config.json",
 )
 
+# Private IP regex patterns for blocklist
+_PRIVATE_IP_PATTERNS = [
+    re.compile(r'\b10\.\d{1,3}\.\d{1,3}\.\d{1,3}\b'),
+    re.compile(r'\b172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}\b'),
+    re.compile(r'\b192\.168\.\d{1,3}\.\d{1,3}\b'),
+    re.compile(r'\b127\.\d{1,3}\.\d{1,3}\.\d{1,3}\b'),
+    re.compile(r'\b169\.254\.\d{1,3}\.\d{1,3}\b'),
+]
+
+
+def _audit_log(command: str, status: str, exit_code: int | None = None) -> None:
+    """Append a command execution record to the audit log.
+
+    Args:
+        command: The shell command that was executed or attempted.
+        status: One of 'auto', 'user', 'denied'.
+        exit_code: Process exit code (None if command was denied/not run).
+    """
+    try:
+        _SAIDO_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).isoformat()
+        entry = {
+            "timestamp": ts,
+            "command": command,
+            "approval_status": status,
+            "exit_code": exit_code,
+        }
+        with open(_AUDIT_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass  # Audit logging must never break command execution
+
+
+def _load_command_blocklist() -> list[dict]:
+    """Load blocked command patterns from ~/.saido_agent/command_blocklist.json.
+
+    Creates the file with sensible defaults if it does not exist.
+    Returns a list of dicts with 'pattern' and 'description' keys.
+    """
+    default_blocklist = [
+        {"pattern": r"rm\s+(-\w*f\w*\s+)*-?\w*r\w*\s+/\s*$", "description": "rm -rf /"},
+        {"pattern": r"rm\s+(-\w*f\w*\s+)*-?\w*r\w*\s+~\s*$", "description": "rm -rf ~"},
+        {"pattern": r"rm\s+(-\w*r\w*\s+)*-?\w*f\w*\s+/\s*$", "description": "rm -rf /"},
+        {"pattern": r"rm\s+(-\w*r\w*\s+)*-?\w*f\w*\s+~\s*$", "description": "rm -rf ~"},
+        {"pattern": r"chmod\s+777\b", "description": "chmod 777 (world-writable)"},
+        {"pattern": r">\s*/etc/", "description": "redirect to /etc/"},
+        {"pattern": r">\s*~/.ssh/", "description": "redirect to ~/.ssh/"},
+    ]
+    try:
+        _SAIDO_DIR.mkdir(parents=True, exist_ok=True)
+        if not _BLOCKLIST_FILE.exists():
+            _BLOCKLIST_FILE.write_text(
+                json.dumps(default_blocklist, indent=2), encoding="utf-8"
+            )
+            return default_blocklist
+        return json.loads(_BLOCKLIST_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return default_blocklist
+
+
+def _check_blocklist(command: str) -> tuple[bool, str]:
+    """Check command against blocklist patterns and built-in rules.
+
+    Returns (blocked, reason). blocked=True means the command must be rejected.
+    """
+    # Check curl/wget to private IP ranges
+    cmd_lower = command.lower()
+    if "curl" in cmd_lower or "wget" in cmd_lower:
+        for pat in _PRIVATE_IP_PATTERNS:
+            if pat.search(command):
+                return True, "Blocked: network request to private/internal IP range"
+
+    # Check file-based blocklist patterns
+    blocklist = _load_command_blocklist()
+    for entry in blocklist:
+        try:
+            if re.search(entry["pattern"], command):
+                desc = entry.get("description", entry["pattern"])
+                return True, f"Blocked by command blocklist: {desc}"
+        except re.error:
+            continue
+
+    return False, ""
+
+
+def _expand_home(path_str: str) -> str:
+    """Expand ~ to the actual home directory for path comparison."""
+    return path_str.replace("~", str(Path.home()))
+
+
+def _check_sensitive_paths(command: str) -> tuple[bool, str]:
+    """Check if command targets sensitive filesystem paths."""
+    expanded = _expand_home(command)
+    for sensitive in _SENSITIVE_PATHS:
+        expanded_sensitive = _expand_home(sensitive)
+        if expanded_sensitive in expanded:
+            return True, f"Blocked: command targets sensitive path {sensitive}"
+    return False, ""
+
+
+def _parse_and_validate_command(command: str) -> tuple[bool, str]:
+    """Parse and validate a shell command for safety.
+
+    Returns (is_safe, reason) where is_safe=True means the command can run
+    without user permission, and reason explains why it was rejected.
+    """
+    cmd = command.strip()
+    if not cmd:
+        return False, "Empty command"
+
+    # Step 1: Check blocklist first (always applies)
+    blocked, reason = _check_blocklist(cmd)
+    if blocked:
+        return False, reason
+
+    # Step 2: Check sensitive paths
+    blocked, reason = _check_sensitive_paths(cmd)
+    if blocked:
+        return False, reason
+
+    # Step 3: Check for shell metacharacters
+    has_metachar = bool(_SHELL_METACHAR_PATTERN.search(cmd))
+
+    if has_metachar:
+        # For pipelines/chains, validate that ALL commands in the pipeline are safe
+        # Split on pipe, semicolons, &&, ||
+        segments = re.split(r'\s*(?:\|\||&&|[;|])\s*', cmd)
+        for segment in segments:
+            segment = segment.strip()
+            if not segment:
+                continue
+            # Check for $() and backtick subshells
+            if '$(' in segment or '`' in segment:
+                return False, "Blocked: command substitution ($() or backticks) requires permission"
+            seg_safe, seg_reason = _validate_single_command(segment)
+            if not seg_safe:
+                return False, f"Blocked: pipeline/chain contains unsafe command: {seg_reason}"
+        return True, "Pipeline of safe commands"
+
+    # Step 4: Validate single command
+    return _validate_single_command(cmd)
+
+
+def _validate_single_command(cmd: str) -> tuple[bool, str]:
+    """Validate a single command (no pipes/chains) against the safe binary allowlist."""
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        return False, "Blocked: malformed command (could not tokenize)"
+
+    if not tokens:
+        return False, "Empty command"
+
+    base_cmd = Path(tokens[0]).name  # Handle /usr/bin/ls -> ls
+
+    # Check for blocked interpreters
+    if base_cmd in _BLOCKED_INTERPRETERS:
+        return False, f"Blocked: '{base_cmd}' is an interpreter and requires explicit permission"
+
+    # Check against safe binary allowlist
+    if base_cmd not in _SAFE_BINARIES:
+        return False, f"Blocked: '{base_cmd}' is not in the safe command allowlist"
+
+    # Special case: chmod 777 is blocked even though chmod is safe
+    if base_cmd == "chmod" and "777" in tokens:
+        return False, "Blocked: chmod 777 (world-writable) is not allowed"
+
+    return True, "Safe command"
+
+
 def _is_safe_bash(cmd: str) -> bool:
-    c = cmd.strip()
-    return any(c.startswith(p) for p in _SAFE_PREFIXES)
+    """Check if a bash command is safe to run without user permission."""
+    is_safe, _ = _parse_and_validate_command(cmd)
+    return is_safe
 
 
 # -- Diff helpers --
@@ -366,6 +559,10 @@ def maybe_truncate_diff(diff_text, max_lines=80):
 # -- Tool implementations --
 
 def _read(file_path: str, limit: int = None, offset: int = None) -> str:
+    try:
+        file_path = get_sandbox().validate(file_path, "read")
+    except PathSandboxError as e:
+        return f"Error: {e}"
     p = Path(file_path)
     if not p.exists():
         return f"Error: file not found: {file_path}"
@@ -383,6 +580,10 @@ def _read(file_path: str, limit: int = None, offset: int = None) -> str:
 
 
 def _write(file_path: str, content: str) -> str:
+    try:
+        file_path = get_sandbox().validate(file_path, "write")
+    except PathSandboxError as e:
+        return f"Error: {e}"
     p = Path(file_path)
     try:
         is_new = not p.exists()
@@ -403,6 +604,10 @@ def _write(file_path: str, content: str) -> str:
 
 
 def _edit(file_path: str, old_string: str, new_string: str, replace_all: bool = False) -> str:
+    try:
+        file_path = get_sandbox().validate(file_path, "edit")
+    except PathSandboxError as e:
+        return f"Error: {e}"
     p = Path(file_path)
     if not p.exists():
         return f"Error: file not found: {file_path}"
@@ -425,7 +630,7 @@ def _edit(file_path: str, old_string: str, new_string: str, replace_all: bool = 
         return f"Error: {e}"
 
 
-def _bash(command: str, timeout: int = 30) -> str:
+def _bash(command: str, timeout: int = 30, _approval_status: str = "auto") -> str:
     try:
         r = subprocess.run(
             command, shell=True, capture_output=True, text=True,
@@ -434,15 +639,23 @@ def _bash(command: str, timeout: int = 30) -> str:
         out = r.stdout
         if r.stderr:
             out += ("\n" if out else "") + "[stderr]\n" + r.stderr
+        _audit_log(command, _approval_status, r.returncode)
         return out.strip() or "(no output)"
     except subprocess.TimeoutExpired:
+        _audit_log(command, _approval_status, exit_code=-1)
         return f"Error: timed out after {timeout}s"
     except Exception as e:
+        _audit_log(command, _approval_status, exit_code=-1)
         return f"Error: {e}"
 
 
 def _glob_tool(pattern: str, path: str = None) -> str:
-    base = Path(path) if path else Path.cwd()
+    search_dir = path or str(Path.cwd())
+    try:
+        search_dir = get_sandbox().validate(search_dir, "glob")
+    except PathSandboxError as e:
+        return f"Error: {e}"
+    base = Path(search_dir)
     try:
         matches = sorted(base.glob(pattern))
         if not matches:
@@ -463,6 +676,12 @@ def _has_rg() -> bool:
 def _grep(pattern: str, path: str = None, glob: str = None,
           output_mode: str = "files_with_matches",
           case_insensitive: bool = False, context: int = 0) -> str:
+    search_path = path or str(Path.cwd())
+    try:
+        search_path = get_sandbox().validate(search_path, "grep")
+    except PathSandboxError as e:
+        return f"Error: {e}"
+    path = search_path  # Use validated path downstream
     use_rg = _has_rg()
     cmd = ["rg" if use_rg else "grep", "--no-heading"]
     if case_insensitive:
@@ -901,9 +1120,33 @@ def execute_tool(
             return "Denied: user rejected edit operation"
     elif name == "Bash":
         cmd = inputs["command"]
-        if permission_mode != "accept-all" and not _is_safe_bash(cmd):
+        is_safe = _is_safe_bash(cmd)
+
+        # Check blocklist -- always enforced, even in accept-all mode
+        blocked, block_reason = _check_blocklist(cmd)
+        if blocked:
+            _audit_log(cmd, "denied")
+            return f"Denied: {block_reason}"
+
+        if permission_mode == "accept-all":
+            # --accept-all hardening: log all auto-approved commands
+            if not is_safe:
+                import sys
+                print(
+                    "\033[1;33m[WARN] --accept-all: auto-approving potentially "
+                    f"unsafe command: {cmd}\033[0m",
+                    file=sys.stderr,
+                )
+            # Command runs but is logged as auto-approved
+            inputs = {**inputs, "_approval_status": "auto"}
+        elif not is_safe:
             if not _check(f"Bash: {cmd}"):
+                _audit_log(cmd, "denied")
                 return "Denied: user rejected bash command"
+            inputs = {**inputs, "_approval_status": "user"}
+        else:
+            inputs = {**inputs, "_approval_status": "auto"}
+
     elif name == "NotebookEdit":
         if not _check(f"Edit notebook {inputs['notebook_path']}"):
             return "Denied: user rejected notebook edit operation"
@@ -942,7 +1185,10 @@ def _register_builtins() -> None:
         ToolDef(
             name="Bash",
             schema=_schemas["Bash"],
-            func=lambda p, c: _bash(p["command"], p.get("timeout", 30)),
+            func=lambda p, c: _bash(
+                p["command"], p.get("timeout", 30),
+                _approval_status=p.get("_approval_status", "auto"),
+            ),
             read_only=False,
             concurrent_safe=False,
         ),
