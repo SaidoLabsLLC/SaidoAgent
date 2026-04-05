@@ -271,15 +271,23 @@ class TestAuth:
         )
         assert resp.status_code == 401
 
-    def test_create_api_key_endpoint(self, client):
+    def test_create_api_key_endpoint(self, client, api_key):
         resp = client.post(
             "/v1/auth/keys",
             json={"tenant_id": "new-tenant"},
+            headers={"X-API-Key": api_key},
         )
         assert resp.status_code == 200
         data = resp.json()
         assert data["api_key"].startswith("sk-saido-")
         assert data["tenant_id"] == "new-tenant"
+
+    def test_create_api_key_requires_auth(self, client):
+        resp = client.post(
+            "/v1/auth/keys",
+            json={"tenant_id": "new-tenant"},
+        )
+        assert resp.status_code == 401
 
 
 class TestRateLimiting:

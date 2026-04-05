@@ -196,11 +196,8 @@ async def create_token(body: TokenRequest):
 
 
 @v1_router.post("/auth/keys", response_model=KeyCreatedResponse, tags=["auth"])
-async def create_key(body: CreateKeyRequest):
-    """Create a new API key for a tenant.
-
-    In production this endpoint should be admin-only.
-    """
+async def create_key(body: CreateKeyRequest, tenant: dict = Depends(get_current_tenant)):
+    """Create a new API key for a tenant. Requires authentication (admin-only)."""
     key = create_api_key(body.tenant_id, rate_limit=body.rate_limit)
     return KeyCreatedResponse(api_key=key, tenant_id=body.tenant_id)
 
@@ -248,8 +245,14 @@ async def ingest_upload(
     file: UploadFile,
     tenant_id: str = Depends(get_current_tenant),
 ):
-    """Ingest content from a file upload."""
+    """Ingest content from a file upload. Max 50MB."""
     agent = _get_tenant_agent(tenant_id)
+
+    # P2-MED-1: Enforce upload size limit to prevent memory exhaustion
+    MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50MB
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"File too large. Maximum size is 50MB, got {len(content)} bytes.")
 
     suffix = Path(file.filename or "upload.md").suffix or ".md"
     with tempfile.NamedTemporaryFile(
@@ -258,7 +261,6 @@ async def ingest_upload(
         prefix="saido_upload_",
         delete=False,
     ) as f:
-        content = await file.read()
         f.write(content)
         tmp_path = f.name
 

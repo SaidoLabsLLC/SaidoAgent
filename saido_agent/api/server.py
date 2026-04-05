@@ -13,6 +13,7 @@ Or via the SDK::
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -77,13 +78,14 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS middleware — allow all origins by default; restrict per deployment
+# CORS middleware — restrict origins via SAIDO_CORS_ORIGINS env var
+_cors_origins = os.environ.get("SAIDO_CORS_ORIGINS", "http://localhost:3000,http://localhost:8000").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[o.strip() for o in _cors_origins],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-API-Key"],
 )
 
 
