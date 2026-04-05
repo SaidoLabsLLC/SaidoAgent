@@ -337,6 +337,28 @@ class SaidoAgent:
             "report": self._cost_tracker.format_report(),
         }
 
+    # ------------------------------------------------------------------
+    # Public API -- Server
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def serve(host: str = "0.0.0.0", port: int = 8000, **kwargs) -> None:
+        """Start the REST API server.
+
+        This is a convenience method that launches the FastAPI server
+        via uvicorn. Equivalent to running::
+
+            uvicorn saido_agent.api.server:app --host 0.0.0.0 --port 8000
+
+        Args:
+            host: Bind address (default ``0.0.0.0``).
+            port: Port number (default ``8000``).
+            **kwargs: Additional arguments passed to ``uvicorn.run()``.
+        """
+        from saido_agent.api.server import run_server
+
+        run_server(host=host, port=port, **kwargs)
+
     @property
     def bridge(self) -> Any:
         """Access the underlying KnowledgeBridge (advanced use)."""

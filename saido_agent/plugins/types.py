@@ -63,6 +63,14 @@ class DependencyPin:
         )
 
 
+class ManifestValidationError(Exception):
+    """Raised when a plugin manifest is missing required fields or has invalid data."""
+
+
+# Required fields for manifest v2 format
+MANIFEST_V2_REQUIRED_FIELDS = frozenset({"name", "version", "author", "license"})
+
+
 @dataclass
 class PluginManifest:
     """Parsed from PLUGIN.md YAML frontmatter or plugin.json."""
@@ -70,6 +78,7 @@ class PluginManifest:
     version: str = "0.1.0"
     description: str = ""
     author: str = ""
+    license: str = ""
     tags: list[str] = field(default_factory=list)
     tools: list[str] = field(default_factory=list)    # python modules exporting tools
     skills: list[str] = field(default_factory=list)   # skill .md files
@@ -77,12 +86,39 @@ class PluginManifest:
     dependencies: list[str] = field(default_factory=list)      # pip packages (legacy, unverified)
     pinned_dependencies: list[DependencyPin] = field(default_factory=list)  # sha256-pinned deps
     homepage: str = ""
+    changelog: str = ""
     signature: str = ""           # Ed25519 signature (base64-encoded) over canonical manifest
     permissions: list[str] = field(default_factory=list)  # required permission categories
     allowed_imports: list[str] = field(default_factory=list)  # additional allowed module imports
+    plugin_dependencies: list[str] = field(default_factory=list)  # other plugins this depends on
+    test_command: str = ""  # command to run plugin's test suite
 
     @classmethod
-    def from_dict(cls, data: dict) -> "PluginManifest":
+    def from_dict(cls, data: dict, strict: bool = False) -> "PluginManifest":
+        """Parse a manifest from a dictionary.
+
+        Args:
+            data: Dictionary of manifest fields.
+            strict: If True, enforce v2 required fields (name, version, author, license).
+                    Defaults to False for backward compatibility. New installs should
+                    use validate_manifest_v2() to enforce v2 requirements.
+
+        Raises:
+            ManifestValidationError: If strict=True and required fields are missing or empty.
+        """
+        # Validate required fields in strict (v2) mode
+        if strict:
+            missing = []
+            for field_name in MANIFEST_V2_REQUIRED_FIELDS:
+                value = data.get(field_name)
+                if not value or (isinstance(value, str) and not value.strip()):
+                    missing.append(field_name)
+            if missing:
+                raise ManifestValidationError(
+                    f"Manifest missing required fields: {', '.join(sorted(missing))}. "
+                    f"All v2 manifests must include: {', '.join(sorted(MANIFEST_V2_REQUIRED_FIELDS))}"
+                )
+
         # Parse pinned dependencies
         pinned: list[DependencyPin] = []
         for dep in data.get("pinned_dependencies", []):
@@ -107,6 +143,7 @@ class PluginManifest:
             version=str(data.get("version", "0.1.0")),
             description=data.get("description", ""),
             author=data.get("author", ""),
+            license=data.get("license", ""),
             tags=data.get("tags", []),
             tools=data.get("tools", []),
             skills=data.get("skills", []),
@@ -114,32 +151,41 @@ class PluginManifest:
             dependencies=data.get("dependencies", []),
             pinned_dependencies=pinned,
             homepage=data.get("homepage", ""),
+            changelog=data.get("changelog", ""),
             signature=data.get("signature", ""),
             permissions=permissions,
             allowed_imports=data.get("allowed_imports", []),
+            plugin_dependencies=data.get("plugin_dependencies", []),
+            test_command=data.get("test_command", ""),
         )
 
     @classmethod
-    def from_plugin_dir(cls, plugin_dir: Path) -> "PluginManifest | None":
-        """Load manifest from a plugin directory (plugin.json or PLUGIN.md frontmatter)."""
+    def from_plugin_dir(cls, plugin_dir: Path, strict: bool = False) -> "PluginManifest | None":
+        """Load manifest from a plugin directory (plugin.json or PLUGIN.md frontmatter).
+
+        Args:
+            plugin_dir: Path to the plugin directory.
+            strict: If True, enforce v2 required fields. Defaults to False
+                    for backward compatibility with existing installed plugins.
+        """
         # Try plugin.json first
         json_file = plugin_dir / "plugin.json"
         if json_file.exists():
             import json
             try:
-                return cls.from_dict(json.loads(json_file.read_text()))
+                return cls.from_dict(json.loads(json_file.read_text()), strict=strict)
             except Exception:
                 pass
 
         # Try PLUGIN.md YAML frontmatter
         md_file = plugin_dir / "PLUGIN.md"
         if md_file.exists():
-            return cls._from_md(md_file)
+            return cls._from_md(md_file, strict=strict)
 
         return None
 
     @classmethod
-    def _from_md(cls, md_file: Path) -> "PluginManifest | None":
+    def _from_md(cls, md_file: Path, strict: bool = False) -> "PluginManifest | None":
         text = md_file.read_text()
         if not text.startswith("---"):
             return None
@@ -158,7 +204,7 @@ class PluginManifest:
                     k, _, v = line.partition(":")
                     data[k.strip()] = v.strip()
         if isinstance(data, dict):
-            return cls.from_dict(data)
+            return cls.from_dict(data, strict=strict)
         return None
 
     def canonical_bytes(self) -> bytes:
@@ -173,6 +219,7 @@ class PluginManifest:
             "version": self.version,
             "description": self.description,
             "author": self.author,
+            "license": self.license,
             "tags": sorted(self.tags),
             "tools": self.tools,
             "skills": self.skills,
@@ -182,8 +229,11 @@ class PluginManifest:
                 for d in self.pinned_dependencies
             ],
             "homepage": self.homepage,
+            "changelog": self.changelog,
             "permissions": sorted(self.permissions),
             "allowed_imports": sorted(self.allowed_imports),
+            "plugin_dependencies": self.plugin_dependencies,
+            "test_command": self.test_command,
         }
         return json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
@@ -250,3 +300,14 @@ def parse_plugin_identifier(identifier: str) -> tuple[str, str | None]:
 def sanitize_plugin_name(name: str) -> str:
     """Ensure plugin name is safe for use as directory name (alphanumeric + underscore)."""
     return re.sub(r"[^\w]", "_", name)
+
+
+def validate_manifest_v2(data: dict) -> PluginManifest:
+    """Parse and validate a manifest dict with strict v2 field requirements.
+
+    Convenience function that calls PluginManifest.from_dict with strict=True.
+
+    Raises:
+        ManifestValidationError: If required fields are missing.
+    """
+    return PluginManifest.from_dict(data, strict=True)

@@ -34,10 +34,14 @@ Slash commands in REPL:
   /mcp add <n> <cmd> [args]  Add a stdio MCP server
   /mcp remove <n>   Remove an MCP server from config
   /plugin           List installed plugins
+  /plugin list      List installed plugins with versions
   /plugin install name@url   Install a plugin
   /plugin uninstall name     Uninstall a plugin
   /plugin enable/disable name  Toggle plugin
   /plugin update name        Update a plugin
+  /plugin update-all         Update all plugins
+  /plugin test name          Run a plugin's test suite
+  /plugin info name          Show plugin details
   /plugin recommend [ctx]    Recommend plugins for context
   /tasks            List all tasks
   /tasks create <subject>    Quick-create a task
@@ -56,6 +60,9 @@ Knowledge commands:
   /docs <slug>      Display a specific article
   /search <query>   Search knowledge store with ranked results
   /compile <slug>   Manually compile a specific article
+  /lint             Full knowledge store health check
+  /lint <slug>      Check specific article health
+  /lint --fix       Auto-fix suggestions for issues found
   /refresh          Re-probe local models via ModelRouter
   /cloud <message>  Force cloud model for a single query
   /stats            Display knowledge store statistics
@@ -904,27 +911,32 @@ def cmd_plugin(args: str, _state, _config) -> bool:
     """Manage plugins.
 
     /plugin                      — list installed plugins
+    /plugin list                 — list installed plugins with versions
     /plugin install name@url     — install a plugin
     /plugin uninstall name       — uninstall a plugin
     /plugin enable name          — enable a plugin
     /plugin disable name         — disable a plugin
     /plugin disable-all          — disable all plugins
     /plugin update name          — update a plugin from its source
+    /plugin update-all           — update all installed plugins
+    /plugin test name            — run a plugin's test suite
     /plugin recommend [context]  — recommend plugins for context
     /plugin info name            — show plugin details
     """
     from saido_agent.plugins import (
         install_plugin, uninstall_plugin, enable_plugin, disable_plugin,
-        disable_all_plugins, update_plugin, list_plugins, get_plugin,
+        disable_all_plugins, update_plugin, update_all_plugins,
+        list_plugins, get_plugin,
         PluginScope, recommend_plugins, format_recommendations,
+        run_plugin_tests, check_plugin_tool_shadows,
     )
 
     parts = args.split(None, 1)
     subcmd = parts[0].lower() if parts else ""
     rest   = parts[1].strip() if len(parts) > 1 else ""
 
-    if not subcmd:
-        # List all plugins
+    if not subcmd or subcmd == "list":
+        # List all plugins with versions
         plugins = list_plugins()
         if not plugins:
             info("No plugins installed.")
@@ -935,8 +947,9 @@ def cmd_plugin(args: str, _state, _config) -> bool:
         for p in plugins:
             state_color = "green" if p.enabled else "dim"
             state_str   = "enabled" if p.enabled else "disabled"
+            ver = f"v{p.manifest.version}" if p.manifest else "v?"
             desc = p.manifest.description if p.manifest else ""
-            print(f"  {clr(p.name, state_color)} [{p.scope.value}] {state_str}  {desc[:60]}")
+            print(f"  {clr(p.name, state_color)} {ver} [{p.scope.value}] {state_str}  {desc[:60]}")
         return True
 
     if subcmd == "install":
@@ -989,6 +1002,28 @@ def cmd_plugin(args: str, _state, _config) -> bool:
         (ok if success else err)(msg)
         return True
 
+    if subcmd == "update-all":
+        results = update_all_plugins()
+        if not results:
+            info("No plugins installed.")
+            return True
+        for pname, success, msg in results:
+            prefix = clr("OK", "green") if success else clr("FAIL", "red")
+            print(f"  {prefix} {pname}: {msg}")
+        return True
+
+    if subcmd == "test":
+        if not rest:
+            err("Usage: /plugin test name")
+            return True
+        # First check for tool shadows
+        shadows = check_plugin_tool_shadows(rest)
+        if shadows:
+            warn(f"Plugin '{rest}' shadows built-in tools: {', '.join(shadows)}")
+        success, msg = run_plugin_tests(rest)
+        (ok if success else err)(msg)
+        return True
+
     if subcmd == "recommend":
         from pathlib import Path as _Path
         context = rest
@@ -1011,21 +1046,32 @@ def cmd_plugin(args: str, _state, _config) -> bool:
             err(f"Plugin '{rest}' not found.")
             return True
         m = entry.manifest
-        print(f"Name:    {entry.name}")
-        print(f"Scope:   {entry.scope.value}")
-        print(f"Source:  {entry.source}")
-        print(f"Dir:     {entry.install_dir}")
-        print(f"Enabled: {entry.enabled}")
+        print(f"Name:      {entry.name}")
+        print(f"Scope:     {entry.scope.value}")
+        print(f"Source:    {entry.source}")
+        print(f"Dir:       {entry.install_dir}")
+        print(f"Enabled:   {entry.enabled}")
         if m:
-            print(f"Version: {m.version}")
-            print(f"Author:  {m.author}")
-            print(f"Desc:    {m.description}")
+            print(f"Version:   {m.version}")
+            print(f"Author:    {m.author}")
+            print(f"License:   {m.license}")
+            print(f"Desc:      {m.description}")
+            if m.homepage:
+                print(f"Homepage:  {m.homepage}")
+            if m.changelog:
+                print(f"Changelog: {m.changelog}")
             if m.tags:
-                print(f"Tags:    {', '.join(m.tags)}")
+                print(f"Tags:      {', '.join(m.tags)}")
             if m.tools:
-                print(f"Tools:   {', '.join(m.tools)}")
+                print(f"Tools:     {', '.join(m.tools)}")
             if m.skills:
-                print(f"Skills:  {', '.join(m.skills)}")
+                print(f"Skills:    {', '.join(m.skills)}")
+            if m.plugin_dependencies:
+                print(f"Depends:   {', '.join(m.plugin_dependencies)}")
+            if m.permissions:
+                print(f"Perms:     {', '.join(m.permissions)}")
+            if m.test_command:
+                print(f"Test cmd:  {m.test_command}")
         return True
 
     err(f"Unknown plugin subcommand: {subcmd}  (try /plugin or /help)")
@@ -1390,6 +1436,113 @@ def cmd_compile(args: str, _state, config) -> bool:
     return True
 
 
+def cmd_lint(args: str, _state, config) -> bool:
+    """Run knowledge store health checks."""
+    kctx = _get_kctx(config)
+    bridge = kctx.get("bridge")
+    if bridge is None or not bridge.available:
+        err("Knowledge subsystem not available.")
+        return True
+
+    from saido_agent.knowledge.lint import KnowledgeLinter
+
+    router = kctx.get("model_router")
+    linter = KnowledgeLinter(bridge, model_router=router)
+    args_stripped = args.strip()
+    fix_mode = False
+
+    if args_stripped == "--fix":
+        fix_mode = True
+        args_stripped = ""
+    elif args_stripped.endswith(" --fix"):
+        fix_mode = True
+        args_stripped = args_stripped[:-6].strip()
+
+    scope = args_stripped if args_stripped else "all"
+    info(f"Running lint checks (scope: {scope})...")
+
+    try:
+        report = linter.lint(scope=scope)
+    except Exception as e:
+        err(f"Lint failed: {e}")
+        return True
+
+    if report.issue_count() == 0:
+        ok("Knowledge store is healthy. No issues found.")
+        return True
+
+    health_color = {
+        "healthy": "green",
+        "needs attention": "yellow",
+        "unhealthy": "red",
+    }.get(report.overall_health, "white")
+    print(clr(
+        f"\n  Health: {report.overall_health}"
+        f" ({report.issue_count()} issue(s))\n",
+        health_color, "bold",
+    ))
+
+    if report.dead_links:
+        warn(f"Dead links ({len(report.dead_links)}):")
+        for article, link in report.dead_links:
+            print(f"    {clr(article, 'cyan')} -> [[{clr(link, 'red')}]]")
+
+    if report.orphans:
+        warn(f"Orphan articles ({len(report.orphans)}):")
+        for orphan_slug in report.orphans:
+            print(f"    {clr(orphan_slug, 'yellow')}")
+            if fix_mode:
+                print(clr(
+                    f"      Suggestion: add [[{orphan_slug}]]"
+                    " backlinks in related articles", "dim",
+                ))
+
+    if report.stale:
+        warn(f"Stale articles ({len(report.stale)}):")
+        for article, last_updated in report.stale:
+            print(
+                f"    {clr(article, 'yellow')}"
+                f"  (last updated: {last_updated})"
+            )
+
+    if report.knowledge_gaps:
+        warn(f"Knowledge gaps ({len(report.knowledge_gaps)}):")
+        for topic, refs in report.knowledge_gaps:
+            print(
+                f"    {clr(topic, 'yellow')}"
+                f"  (referenced by: {', '.join(refs)})"
+            )
+            if fix_mode:
+                print(clr(
+                    f"      Suggestion: create dedicated"
+                    f" article for '{topic}'", "dim",
+                ))
+
+    if report.duplicates:
+        warn(f"Potential duplicates ({len(report.duplicates)}):")
+        for art_a, art_b, reason in report.duplicates:
+            print(
+                f"    {clr(art_a, 'cyan')}"
+                f" <-> {clr(art_b, 'cyan')}: {reason}"
+            )
+
+    if report.contradictions:
+        warn(f"Contradictions ({len(report.contradictions)}):")
+        for art_a, art_b, desc in report.contradictions:
+            print(
+                f"    {clr(art_a, 'cyan')}"
+                f" vs {clr(art_b, 'cyan')}: {desc}"
+            )
+
+    if report.missing_data:
+        warn(f"Missing evidence ({len(report.missing_data)}):")
+        for article, item in report.missing_data:
+            print(f"    {clr(article, 'cyan')}: {item}")
+
+    print()
+    return True
+
+
 def cmd_refresh(_args: str, _state, config) -> bool:
     """Re-probe local models via ModelRouter."""
     kctx = _get_kctx(config)
@@ -1476,6 +1629,7 @@ COMMANDS = {
     "docs":           cmd_docs,
     "search":         cmd_search,
     "compile":        cmd_compile,
+    "lint":           cmd_lint,
     "refresh":        cmd_refresh,
     "cloud":          cmd_cloud,
     "stats":          cmd_stats,

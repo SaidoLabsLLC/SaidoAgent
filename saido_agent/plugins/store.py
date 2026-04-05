@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 from .types import (
     DependencyPin,
+    ManifestValidationError,
     PluginEntry,
     PluginManifest,
     PluginScope,
@@ -392,6 +393,13 @@ def disable_all_plugins(scope: PluginScope | None = None) -> tuple[bool, str]:
 # ── Update ────────────────────────────────────────────────────────────────────
 
 def update_plugin(name: str, scope: PluginScope | None = None) -> tuple[bool, str]:
+    """Update a single plugin from its git source.
+
+    Pulls latest changes, re-verifies the manifest signature,
+    and compares versions before applying.
+    """
+    from .verify import verify_manifest_signature
+
     entry = get_plugin(name, scope)
     if entry is None:
         return False, f"Plugin '{name}' not found."
@@ -399,6 +407,9 @@ def update_plugin(name: str, scope: PluginScope | None = None) -> tuple[bool, st
         return False, f"Plugin '{name}' was installed from a local path; cannot auto-update."
     if not entry.install_dir.exists():
         return False, f"Install directory missing: {entry.install_dir}"
+
+    old_version = entry.manifest.version if entry.manifest else "0.0.0"
+
     result = subprocess.run(
         ["git", "pull", "--ff-only"],
         cwd=str(entry.install_dir),
@@ -406,10 +417,262 @@ def update_plugin(name: str, scope: PluginScope | None = None) -> tuple[bool, st
     )
     if result.returncode != 0:
         return False, f"git pull failed: {result.stderr.strip()}"
-    # Re-install dependencies if manifest changed
+
+    # Re-load and verify manifest
     manifest = PluginManifest.from_plugin_dir(entry.install_dir)
+    if manifest and manifest.signature:
+        try:
+            verify_manifest_signature(manifest)
+        except PluginSecurityError as e:
+            return False, f"Updated manifest signature verification failed: {e}"
+
+    new_version = manifest.version if manifest else "0.0.0"
+
+    # Re-install dependencies if manifest changed
     if manifest and manifest.dependencies:
         dep_ok, dep_msg = _install_dependencies_validated(manifest.dependencies)
         if not dep_ok:
             return False, dep_msg
-    return True, f"Plugin '{name}' updated. {result.stdout.strip()}"
+    if manifest and manifest.pinned_dependencies:
+        dep_ok, dep_msg = _install_pinned_dependencies(manifest.pinned_dependencies)
+        if not dep_ok:
+            return False, dep_msg
+
+    if _compare_versions(new_version, old_version) > 0:
+        return True, f"Plugin '{name}' updated from {old_version} to {new_version}."
+    return True, f"Plugin '{name}' is already at latest version ({old_version})."
+
+
+# ── Version Comparison ───────────────────────────────────────────────────────
+
+def _parse_version_tuple(version_str: str) -> tuple[int, ...]:
+    """Parse a semver-like string into a tuple of integers for comparison.
+
+    Handles formats like '1.2.3', '0.1.0', '2.0'. Non-numeric parts are treated as 0.
+    """
+    parts: list[int] = []
+    for part in version_str.split("."):
+        # Strip pre-release suffixes like '-beta', '-rc1'
+        numeric = part.split("-")[0].split("+")[0]
+        try:
+            parts.append(int(numeric))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts)
+
+
+def _compare_versions(v1: str, v2: str) -> int:
+    """Compare two version strings.
+
+    Returns:
+        >0 if v1 > v2, 0 if equal, <0 if v1 < v2.
+    """
+    t1 = _parse_version_tuple(v1)
+    t2 = _parse_version_tuple(v2)
+    # Pad to same length
+    max_len = max(len(t1), len(t2))
+    t1 = t1 + (0,) * (max_len - len(t1))
+    t2 = t2 + (0,) * (max_len - len(t2))
+    if t1 > t2:
+        return 1
+    elif t1 < t2:
+        return -1
+    return 0
+
+
+# ── Check for Updates ────────────────────────────────────────────────────────
+
+def check_for_updates(name: str, scope: PluginScope | None = None) -> tuple[bool, str, str | None]:
+    """Check if a plugin has updates available.
+
+    Returns:
+        (has_update, message, new_version_or_None)
+    """
+    entry = get_plugin(name, scope)
+    if entry is None:
+        return False, f"Plugin '{name}' not found.", None
+    if not _is_git_url(entry.source):
+        return False, f"Plugin '{name}' was installed from a local path; cannot check for updates.", None
+    if not entry.install_dir.exists():
+        return False, f"Install directory missing: {entry.install_dir}", None
+
+    installed_version = entry.manifest.version if entry.manifest else "0.0.0"
+
+    # Fetch remote without merging to check for updates
+    result = subprocess.run(
+        ["git", "fetch", "--quiet"],
+        cwd=str(entry.install_dir),
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return False, f"git fetch failed: {result.stderr.strip()}", None
+
+    # Check if local is behind remote
+    result = subprocess.run(
+        ["git", "rev-list", "--count", "HEAD..@{u}"],
+        cwd=str(entry.install_dir),
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return False, f"Cannot determine update status: {result.stderr.strip()}", None
+
+    behind_count = int(result.stdout.strip()) if result.stdout.strip().isdigit() else 0
+    if behind_count == 0:
+        return False, f"Plugin '{name}' is up to date (v{installed_version}).", None
+
+    return True, f"Plugin '{name}' has updates available (currently v{installed_version}, {behind_count} commit(s) behind).", None
+
+
+def update_all_plugins(scope: PluginScope | None = None) -> list[tuple[str, bool, str]]:
+    """Check and update all installed plugins.
+
+    Returns:
+        List of (plugin_name, success, message) tuples.
+    """
+    results: list[tuple[str, bool, str]] = []
+    for entry in list_plugins(scope):
+        if not _is_git_url(entry.source):
+            results.append((entry.name, False, "Local plugin, skipped."))
+            continue
+        success, msg = update_plugin(entry.name, entry.scope)
+        results.append((entry.name, success, msg))
+    return results
+
+
+# ── Plugin Dependency Resolution ─────────────────────────────────────────────
+
+class CircularDependencyError(Exception):
+    """Raised when circular plugin dependencies are detected."""
+
+
+def resolve_plugin_dependencies(
+    plugin_name: str,
+    plugin_deps: list[str],
+    _visited: set[str] | None = None,
+    _stack: set[str] | None = None,
+) -> list[str]:
+    """Resolve plugin dependency install order using topological sort.
+
+    Args:
+        plugin_name: The plugin being installed.
+        plugin_deps: List of plugin names this plugin depends on.
+        _visited: Internal tracking for visited nodes.
+        _stack: Internal tracking for the current recursion stack (cycle detection).
+
+    Returns:
+        Ordered list of plugin names to install (dependencies first).
+
+    Raises:
+        CircularDependencyError: If a circular dependency is detected.
+    """
+    if _visited is None:
+        _visited = set()
+    if _stack is None:
+        _stack = set()
+
+    if plugin_name in _stack:
+        raise CircularDependencyError(
+            f"Circular dependency detected: '{plugin_name}' depends on itself "
+            f"through the chain: {' -> '.join(sorted(_stack))} -> {plugin_name}"
+        )
+
+    if plugin_name in _visited:
+        return []
+
+    _stack.add(plugin_name)
+    install_order: list[str] = []
+
+    for dep_name in plugin_deps:
+        # Check if dependency is already installed
+        existing = get_plugin(dep_name)
+        if existing:
+            _visited.add(dep_name)
+            continue
+
+        # Check if dependency has its own dependencies (would need manifest)
+        # For now, add uninstalled deps directly
+        if dep_name in _stack:
+            raise CircularDependencyError(
+                f"Circular dependency detected: '{plugin_name}' -> '{dep_name}' -> "
+                f"... -> '{plugin_name}'"
+            )
+
+        if dep_name not in _visited:
+            install_order.append(dep_name)
+            _visited.add(dep_name)
+
+    _stack.discard(plugin_name)
+    _visited.add(plugin_name)
+    return install_order
+
+
+# ── Plugin Testing ───────────────────────────────────────────────────────────
+
+def run_plugin_tests(name: str, scope: PluginScope | None = None) -> tuple[bool, str]:
+    """Run a plugin's test suite if defined in its manifest.
+
+    Returns:
+        (success, output_message)
+    """
+    entry = get_plugin(name, scope)
+    if entry is None:
+        return False, f"Plugin '{name}' not found."
+    if not entry.manifest:
+        return False, f"Plugin '{name}' has no manifest."
+    if not entry.manifest.test_command:
+        return False, f"Plugin '{name}' has no test_command defined in its manifest."
+    if not entry.install_dir.exists():
+        return False, f"Plugin install directory missing: {entry.install_dir}"
+
+    result = subprocess.run(
+        entry.manifest.test_command,
+        shell=True,
+        cwd=str(entry.install_dir),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    output = result.stdout.strip()
+    if result.stderr.strip():
+        output += "\n" + result.stderr.strip()
+
+    if result.returncode == 0:
+        return True, f"Tests passed for '{name}'.\n{output}"
+    return False, f"Tests failed for '{name}' (exit code {result.returncode}).\n{output}"
+
+
+def check_plugin_tool_shadows(
+    plugin_name: str,
+    scope: PluginScope | None = None,
+) -> list[str]:
+    """Check if a plugin's tools shadow any built-in tools.
+
+    Returns:
+        List of tool names that would shadow built-in tools.
+    """
+    from saido_agent.core.tool_registry import get_all_tools
+
+    entry = get_plugin(plugin_name, scope)
+    if entry is None or not entry.manifest or not entry.manifest.tools:
+        return []
+
+    # Collect built-in tool names (tools registered before plugin loading)
+    builtin_names = {t.name for t in get_all_tools()}
+
+    # Collect tool names from the plugin's modules
+    shadows: list[str] = []
+    from .sandbox import sandboxed_import_plugin_module
+    for module_name in entry.manifest.tools:
+        mod = sandboxed_import_plugin_module(entry, module_name)
+        if mod is None:
+            continue
+        if hasattr(mod, "TOOL_DEFS"):
+            for tdef in mod.TOOL_DEFS:
+                if tdef.name in builtin_names:
+                    shadows.append(tdef.name)
+        if hasattr(mod, "TOOL_SCHEMAS"):
+            for schema in mod.TOOL_SCHEMAS:
+                tool_name = schema.get("name", "")
+                if tool_name in builtin_names:
+                    shadows.append(tool_name)
+    return shadows
