@@ -235,12 +235,12 @@ class KnowledgeQA:
 
         # System preamble
         sections.append(
-            "You are Saido Agent, a knowledge-grounded AI assistant. "
+            "You are Saido Agent, a knowledge-grounded AI assistant. /no_think\n"
             "Answer the question using ONLY the provided knowledge base "
             "articles. Cite your sources using [Article Title] notation.\n\n"
             "If the knowledge base does not contain enough information to "
             "fully answer the question, say so explicitly. Do not make up "
-            "information."
+            "information.\n\nBe concise and direct."
         )
 
         # Knowledge base articles
@@ -295,7 +295,9 @@ class KnowledgeQA:
             from saido_agent.core.providers import stream as llm_stream
 
             provider, model = self._router.select_model("qa")
-            messages = [{"role": "user", "content": prompt}]
+            # Append /no_think for Qwen 3 models to skip reasoning and respond faster
+            effective_prompt = prompt + "\n/no_think" if "qwen" in model.lower() else prompt
+            messages = [{"role": "user", "content": effective_prompt}]
             total_text = ""
             tokens = 0
 
