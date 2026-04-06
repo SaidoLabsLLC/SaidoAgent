@@ -698,15 +698,21 @@ def _stream_query(body: QueryRequest, tenant_id: str) -> StreamingResponse:
     async def event_generator():
         agent = _get_tenant_agent(tenant_id)
 
+        # Send a "thinking" event so the UI knows we're working
+        yield f"data: {json.dumps({'type': 'thinking', 'content': 'Searching knowledge store...'})}\n\n"
+
         # Run the query in a thread (it's synchronous)
         result = await asyncio.to_thread(
             agent.query, body.question, body.context
         )
 
-        # Stream the answer token-by-token (simulated since the SDK
-        # returns a complete answer; a future version will support
-        # true streaming from the LLM provider)
-        words = result.answer.split(" ")
+        # If answer is empty, provide a helpful fallback
+        answer = result.answer
+        if not answer or not answer.strip():
+            answer = "I don't have information about that in the knowledge store. Try ingesting relevant documents first, or ask about topics already in the knowledge base."
+
+        # Stream the answer token-by-token
+        words = answer.split(" ")
         for i, word in enumerate(words):
             token = word if i == 0 else " " + word
             event_data = json.dumps({"type": "token", "content": token})

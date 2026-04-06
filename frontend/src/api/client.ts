@@ -185,6 +185,9 @@ export function streamQuery(
             const event = JSON.parse(jsonStr);
             if (event.type === "token") {
               onToken(event.content);
+            } else if (event.type === "thinking") {
+              // Show thinking indicator as a dim token
+              onToken("");
             } else if (event.type === "done") {
               onDone(event.result);
             }
