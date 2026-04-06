@@ -127,7 +127,7 @@ class TestAutoDetection:
 
 class TestModelSizeExtraction:
     def test_standard_format(self):
-        assert _extract_model_size("qwen3:8b") == 30.0
+        assert _extract_model_size("qwen3:8b") == 8.0
 
     def test_decimal_format(self):
         assert _extract_model_size("phi4:3.8b") == 3.8
@@ -168,8 +168,8 @@ class TestRoutingLocalSelection:
         best = router_with_local.auto_select_best_local()
         assert best is not None
         provider, model = best
-        # qwen3:8b is the largest model from our test data
-        assert model == "qwen3:8b"
+        # deepseek-r1-14b (14B) is the largest model from our test data
+        assert model == "deepseek-r1-14b"
 
 
 # ---------------------------------------------------------------------------

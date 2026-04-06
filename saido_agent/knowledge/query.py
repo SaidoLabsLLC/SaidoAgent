@@ -330,8 +330,11 @@ class KnowledgeQA:
 
             return total_text, tokens, f"{provider}/{model}"
 
-        except Exception:
-            logger.exception("LLM call failed")
+        except Exception as exc:
+            try:
+                logger.error("LLM call failed: %s", str(exc).encode("ascii", "replace").decode())
+            except Exception:
+                logger.error("LLM call failed (details not printable)")
             return None, 0, ""
 
     # ------------------------------------------------------------------
