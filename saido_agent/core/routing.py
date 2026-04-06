@@ -23,12 +23,12 @@ ROUTING_CONFIG_FILE = ROUTING_CONFIG_DIR / "routing.json"
 
 DEFAULT_ROUTING_CONFIG: dict[str, Any] = {
     "routing": {
-        "ingest":    {"prefer": "local", "model": "qwen3:30b"},
-        "compile":   {"prefer": "local", "model": "qwen3:30b"},
-        "index":     {"prefer": "local", "model": "qwen3:30b"},
-        "lint":      {"prefer": "local", "model": "qwen3:30b"},
-        "qa":        {"prefer": "local", "model": "qwen3:30b", "escalate_on_failure": True},
-        "code_gen":  {"prefer": "local", "model": "qwen3:30b", "escalate_on_failure": True},
+        "ingest":    {"prefer": "local", "model": "qwen3:8b"},
+        "compile":   {"prefer": "local", "model": "qwen3:8b"},
+        "index":     {"prefer": "local", "model": "qwen3:8b"},
+        "lint":      {"prefer": "local", "model": "qwen3:8b"},
+        "qa":        {"prefer": "local", "model": "qwen3:8b", "escalate_on_failure": True},
+        "code_gen":  {"prefer": "local", "model": "qwen3:8b", "escalate_on_failure": True},
         "review":    {"prefer": "cloud", "model": "claude-sonnet-4-6"},
         "architect": {"prefer": "cloud", "model": "claude-opus-4-6"},
     },
@@ -66,7 +66,7 @@ def _http_get_json(url: str, timeout: float = _PROBE_TIMEOUT) -> Any:
 def _extract_model_size(name: str) -> float:
     """Extract approximate parameter size in billions from model name string.
 
-    Examples: 'qwen3:30b' -> 30.0, 'llama3.3:70b' -> 70.0, 'phi4' -> 0.0
+    Examples: 'qwen3:8b' -> 30.0, 'llama3.3:70b' -> 70.0, 'phi4' -> 0.0
     """
     import re
     match = re.search(r"(\d+(?:\.\d+)?)\s*[bB]", name)
@@ -248,7 +248,7 @@ class ModelRouter:
         """Select provider and model for a given task type.
 
         Returns:
-            (provider_name, model_name) — e.g. ("ollama", "qwen3:30b")
+            (provider_name, model_name) — e.g. ("ollama", "qwen3:8b")
             or ("anthropic", "claude-sonnet-4-6")
         """
         routing = self._routing_config.get("routing", {})
@@ -256,7 +256,7 @@ class ModelRouter:
 
         task_cfg = routing.get(task_type, {})
         prefer = task_cfg.get("prefer", "local")
-        model = task_cfg.get("model", "qwen3:30b")
+        model = task_cfg.get("model", "qwen3:8b")
 
         # /cloud prefix forces cloud for this call
         if self._force_cloud:

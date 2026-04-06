@@ -78,7 +78,7 @@ def _make_bridge(
 def _make_router(response_text: str) -> MagicMock:
     """Build a mock ModelRouter that makes _call_llm return a canned response."""
     router = MagicMock()
-    router.select_model.return_value = ("ollama", "qwen3:30b")
+    router.select_model.return_value = ("ollama", "qwen3:8b")
     # We patch _call_llm directly rather than the full provider chain
     return router
 

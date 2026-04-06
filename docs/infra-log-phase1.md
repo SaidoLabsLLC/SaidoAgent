@@ -20,7 +20,7 @@
 | Decision | Choice | Alternatives Considered | Rationale | Limitations |
 |----------|--------|------------------------|-----------|-------------|
 | Local LLM runtime | Ollama | LM Studio, llama.cpp direct | Already installed, simple API, model management | Ollama-specific API for model listing |
-| Default local model | qwen3:30b (18GB) | qwen2.5-coder:32b, llama3.3 | User's installed model; newer than PRD spec | Large RAM requirement (~18GB) |
+| Default local model | qwen3:8b (18GB) | qwen2.5-coder:32b, llama3.3 | User's installed model; newer than PRD spec | Large RAM requirement (~18GB) |
 | Model routing default | Local-first for all tasks except review/architect | All-cloud, hybrid | Zero marginal cost for routine operations | Local model quality ceiling for complex reasoning |
 | Cloud escalation | claude-sonnet-4-6 (mid), claude-opus-4-6 (frontier) | GPT-4o, Gemini | Anthropic SDK already integrated | Requires API key for cloud operations |
 | Routing config | ~/.saido_agent/routing.json | Environment vars, pyproject.toml section | User-editable JSON, per-task granularity | Manual editing required for changes |

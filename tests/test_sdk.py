@@ -99,7 +99,7 @@ class TestSaidoAgentInit:
         """SaidoAgent accepts a routing_config path."""
         routing_file = tmp_path / "routing.json"
         routing_file.write_text(json.dumps({
-            "routing": {"qa": {"prefer": "local", "model": "qwen3:30b"}},
+            "routing": {"qa": {"prefer": "local", "model": "qwen3:8b"}},
             "local_providers": {},
         }))
 
@@ -200,7 +200,7 @@ class TestQuery:
                 mock_llm.return_value = (
                     "This is about knowledge management. [Sample Doc]",
                     150,
-                    "ollama/qwen3:30b",
+                    "ollama/qwen3:8b",
                 )
                 # Still returns a result (empty store -> low confidence path)
                 result = agent.query("What is this about?")
@@ -476,13 +476,13 @@ class TestSaidoConfig:
         cfg_file = tmp_path / "config.json"
         cfg_file.write_text(json.dumps({
             "knowledge_dir": "/data/kb",
-            "model": "qwen3:30b",
+            "model": "qwen3:8b",
             "routing": {"qa": {"prefer": "local"}},
         }))
 
         config = SaidoConfig(config_path=str(cfg_file))
         assert config.knowledge_dir == "/data/kb"
-        assert config.model == "qwen3:30b"
+        assert config.model == "qwen3:8b"
         assert config.routing == {"qa": {"prefer": "local"}}
 
     def test_config_update_persists(self, tmp_path):

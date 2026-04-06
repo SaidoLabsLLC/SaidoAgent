@@ -301,6 +301,7 @@ class KnowledgeQA:
             total_text = ""
             tokens = 0
 
+            thinking_text = ""
             for chunk in llm_stream(
                 model=f"{provider}/{model}" if provider not in ("anthropic",) else model,
                 system="",
@@ -311,13 +312,21 @@ class KnowledgeQA:
                 from saido_agent.core.providers import (
                     AssistantTurn,
                     TextChunk,
+                    ThinkingChunk,
                 )
 
                 if isinstance(chunk, TextChunk):
                     total_text += chunk.text
+                elif isinstance(chunk, ThinkingChunk):
+                    thinking_text += chunk.text
                 elif isinstance(chunk, AssistantTurn):
-                    total_text = chunk.text
+                    if chunk.text:
+                        total_text = chunk.text
                     tokens = chunk.in_tokens + chunk.out_tokens
+
+            # If model only produced thinking (no content), use thinking as the answer
+            if not total_text.strip() and thinking_text.strip():
+                total_text = thinking_text.strip()
 
             return total_text, tokens, f"{provider}/{model}"
 

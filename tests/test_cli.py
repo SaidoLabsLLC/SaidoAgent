@@ -49,7 +49,7 @@ def _make_state():
 def _make_config(**overrides) -> dict:
     """Return a minimal config dict for tests."""
     cfg: dict[str, Any] = {
-        "model": "qwen3:30b",
+        "model": "qwen3:8b",
         "max_tokens": 4096,
         "permission_mode": "auto",
         "verbose": False,
@@ -264,7 +264,7 @@ class TestCost:
     def test_cost_uses_cost_tracker(self, capsys):
         tracker = MagicMock()
         tracker.total_tokens = 5000
-        tracker.format_report.return_value = "Session cost:\n  Local (qwen3:30b):  5,000 tokens -- $0.00"
+        tracker.format_report.return_value = "Session cost:\n  Local (qwen3:8b):  5,000 tokens -- $0.00"
         config = _make_config(_knowledge_context=_make_kctx(cost_tracker=tracker))
         cmd_cost("", _make_state(), config)
         out = capsys.readouterr().out
@@ -314,8 +314,8 @@ class TestStartupBanner:
     def test_banner_with_local_model(self, mock_detect, capsys):
         router = MagicMock()
         router.offline_mode = False
-        router.get_available_local_models.return_value = [("ollama", "qwen3:30b")]
-        router.auto_select_best_local.return_value = ("ollama", "qwen3:30b")
+        router.get_available_local_models.return_value = [("ollama", "qwen3:8b")]
+        router.auto_select_best_local.return_value = ("ollama", "qwen3:8b")
 
         bridge = _make_bridge_mock(article_count=142, categories=["a"] * 8)
         kctx = _make_kctx(bridge=bridge, router=router)
@@ -403,13 +403,13 @@ class TestRefresh:
         router = MagicMock()
         pinfo = MagicMock()
         pinfo.available = True
-        pinfo.models = ["qwen3:30b"]
+        pinfo.models = ["qwen3:8b"]
         router.refresh.return_value = {"ollama": pinfo}
         config = _make_config(_knowledge_context=_make_kctx(router=router))
         cmd_refresh("", _make_state(), config)
         router.refresh.assert_called_once()
         out = capsys.readouterr().out
-        assert "qwen3:30b" in out
+        assert "qwen3:8b" in out
 
 
 class TestCloud:

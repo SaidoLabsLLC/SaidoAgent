@@ -34,7 +34,7 @@ from saido_agent.core.cost_tracker import CostTracker, ModelUsage
 
 OLLAMA_TAGS_RESPONSE = {
     "models": [
-        {"name": "qwen3:30b", "size": 30_000_000_000},
+        {"name": "qwen3:8b", "size": 30_000_000_000},
         {"name": "llama3.3:8b", "size": 8_000_000_000},
         {"name": "phi4:3.8b", "size": 3_800_000_000},
     ]
@@ -88,7 +88,7 @@ class TestAutoDetection:
     def test_probe_ollama_parses_models(self, router_with_local: ModelRouter):
         info = router_with_local._local_providers["ollama"]
         assert info.available is True
-        assert "qwen3:30b" in info.models
+        assert "qwen3:8b" in info.models
         assert "llama3.3:8b" in info.models
         assert len(info.models) == 3
 
@@ -127,7 +127,7 @@ class TestAutoDetection:
 
 class TestModelSizeExtraction:
     def test_standard_format(self):
-        assert _extract_model_size("qwen3:30b") == 30.0
+        assert _extract_model_size("qwen3:8b") == 30.0
 
     def test_decimal_format(self):
         assert _extract_model_size("phi4:3.8b") == 3.8
@@ -147,7 +147,7 @@ class TestRoutingLocalSelection:
     def test_local_preferred_selects_local(self, router_with_local: ModelRouter):
         provider, model = router_with_local.select_model("ingest")
         assert provider == "ollama"
-        assert model == "qwen3:30b"
+        assert model == "qwen3:8b"
 
     def test_local_preferred_for_all_local_tasks(self, router_with_local: ModelRouter):
         for task in ("ingest", "compile", "index", "lint", "qa", "code_gen"):
@@ -168,8 +168,8 @@ class TestRoutingLocalSelection:
         best = router_with_local.auto_select_best_local()
         assert best is not None
         provider, model = best
-        # qwen3:30b is the largest model from our test data
-        assert model == "qwen3:30b"
+        # qwen3:8b is the largest model from our test data
+        assert model == "qwen3:8b"
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +250,7 @@ class TestOfflineMode:
 class TestCostTracker:
     def test_local_tokens_are_free(self):
         tracker = CostTracker()
-        tracker.record("ollama", "qwen3:30b", 500_000, 500_000)
+        tracker.record("ollama", "qwen3:8b", 500_000, 500_000)
         assert tracker.total_cost == 0.0
         assert tracker.total_tokens == 1_000_000
 
@@ -262,30 +262,30 @@ class TestCostTracker:
 
     def test_accumulates_across_calls(self):
         tracker = CostTracker()
-        tracker.record("ollama", "qwen3:30b", 100_000, 100_000)
-        tracker.record("ollama", "qwen3:30b", 200_000, 200_000)
+        tracker.record("ollama", "qwen3:8b", 100_000, 100_000)
+        tracker.record("ollama", "qwen3:8b", 200_000, 200_000)
         assert tracker.total_tokens == 600_000
 
     def test_mixed_usage_savings(self):
         tracker = CostTracker()
-        tracker.record("ollama", "qwen3:30b", 1_000_000, 247_000)
+        tracker.record("ollama", "qwen3:8b", 1_000_000, 247_000)
         tracker.record("anthropic", "claude-sonnet-4-6", 10_000, 2_400)
         savings = tracker.estimated_savings
         assert savings > 0.0
 
     def test_format_report_contains_key_info(self):
         tracker = CostTracker()
-        tracker.record("ollama", "qwen3:30b", 1_247_000, 0)
+        tracker.record("ollama", "qwen3:8b", 1_247_000, 0)
         tracker.record("anthropic", "claude-sonnet-4-6", 12_400, 0)
         report = tracker.format_report()
-        assert "qwen3:30b" in report
+        assert "qwen3:8b" in report
         assert "claude-sonnet-4-6" in report
         assert "$0.00" in report
         assert "savings" in report.lower()
 
     def test_reset_clears_all(self):
         tracker = CostTracker()
-        tracker.record("ollama", "qwen3:30b", 100_000, 100_000)
+        tracker.record("ollama", "qwen3:8b", 100_000, 100_000)
         tracker.reset()
         assert tracker.total_tokens == 0
         assert tracker.total_cost == 0.0
@@ -303,7 +303,7 @@ class TestDefaultConfig:
         assert tmp_routing_config.exists()
         data = json.loads(tmp_routing_config.read_text())
         assert "routing" in data
-        assert data["routing"]["ingest"]["model"] == "qwen3:30b"
+        assert data["routing"]["ingest"]["model"] == "qwen3:8b"
 
     def test_loads_existing_config(self, tmp_routing_config: Path):
         custom = {
@@ -319,7 +319,7 @@ class TestDefaultConfig:
     def test_status_summary_not_empty(self, router_with_local: ModelRouter):
         summary = router_with_local.status_summary()
         assert "ollama" in summary.lower()
-        assert "qwen3:30b" in summary
+        assert "qwen3:8b" in summary
 
 
 # ---------------------------------------------------------------------------
@@ -330,8 +330,8 @@ class TestLocalProviderInfo:
     def test_to_dict(self):
         info = LocalProviderInfo("ollama", "http://localhost:11434/v1")
         info.available = True
-        info.models = ["qwen3:30b"]
+        info.models = ["qwen3:8b"]
         d = info.to_dict()
         assert d["name"] == "ollama"
         assert d["available"] is True
-        assert "qwen3:30b" in d["models"]
+        assert "qwen3:8b" in d["models"]

@@ -137,7 +137,7 @@ def mock_bridge() -> MagicMock:
 def mock_router() -> MagicMock:
     """Return a mock ModelRouter."""
     router = MagicMock()
-    router.select_model.return_value = ("ollama", "qwen3:30b")
+    router.select_model.return_value = ("ollama", "qwen3:8b")
     return router
 
 

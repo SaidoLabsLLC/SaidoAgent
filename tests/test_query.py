@@ -103,7 +103,7 @@ def mock_bridge() -> MagicMock:
 def mock_router() -> MagicMock:
     """Return a mock ModelRouter."""
     router = MagicMock()
-    router.select_model.return_value = ("ollama", "qwen3:30b")
+    router.select_model.return_value = ("ollama", "qwen3:8b")
     return router
 
 
@@ -307,7 +307,7 @@ class TestQueryWorkflow:
     def _patch_llm(self, qa: KnowledgeQA, response: str, tokens: int = 150):
         """Patch _call_llm to return a canned response."""
         qa._call_llm = MagicMock(  # type: ignore[method-assign]
-            return_value=(response, tokens, "ollama/qwen3:30b")
+            return_value=(response, tokens, "ollama/qwen3:8b")
         )
 
     def test_query_returns_saido_query_result(
@@ -323,7 +323,7 @@ class TestQueryWorkflow:
         assert "Python" in result.answer
         assert result.confidence == "high"
         assert result.tokens_used == 150
-        assert result.provider == "ollama/qwen3:30b"
+        assert result.provider == "ollama/qwen3:8b"
 
     def test_query_includes_citations(self, qa: KnowledgeQA) -> None:
         self._patch_llm(
@@ -494,7 +494,7 @@ class TestSaidoQueryResult:
             confidence="high",
             retrieval_stats={"document_count": 5},
             tokens_used=200,
-            provider="ollama/qwen3:30b",
+            provider="ollama/qwen3:8b",
         )
         assert len(r.citations) == 1
         assert r.retrieval_stats["document_count"] == 5

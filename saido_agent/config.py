@@ -104,7 +104,7 @@ class SaidoConfig:
 
         Example::
 
-            config.update(knowledge_dir="/data/kb", model="qwen3:30b")
+            config.update(knowledge_dir="/data/kb", model="qwen3:8b")
         """
         self._data.update(kwargs)
         self._save()

@@ -214,7 +214,7 @@ def _build_compile_prompt(
 class WikiCompiler:
     """Enriches SmartRAG documents with LLM-generated metadata.
 
-    Uses the ModelRouter to select an LLM (defaults to local qwen3:30b
+    Uses the ModelRouter to select an LLM (defaults to local qwen3:8b
     via the ``compile`` task type) and sends a structured prompt to
     produce improved summaries, semantic concepts, categories, and
     backlinks.
@@ -539,17 +539,26 @@ class WikiCompiler:
 
             # Consume the generator to get the AssistantTurn
             text_parts: list[str] = []
+            thinking_parts: list[str] = []
             for chunk in gen:
-                from saido_agent.core.providers import AssistantTurn, TextChunk
+                from saido_agent.core.providers import AssistantTurn, TextChunk, ThinkingChunk
 
                 if isinstance(chunk, TextChunk):
                     text_parts.append(chunk.text)
+                elif isinstance(chunk, ThinkingChunk):
+                    thinking_parts.append(chunk.text)
                 elif isinstance(chunk, AssistantTurn):
                     if chunk.text:
                         return chunk.text
-                    return "".join(text_parts) if text_parts else None
+                    if text_parts:
+                        return "".join(text_parts)
+                    # Fallback: use thinking content if no regular content
+                    if thinking_parts:
+                        return "".join(thinking_parts)
+                    return None
 
-            return "".join(text_parts) if text_parts else None
+            result = "".join(text_parts) if text_parts else ("".join(thinking_parts) if thinking_parts else None)
+            return result
 
         except Exception as exc:
             logger.error("LLM call failed for compile: %s", exc)
