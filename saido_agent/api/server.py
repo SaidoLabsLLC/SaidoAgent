@@ -145,13 +145,47 @@ add_api_version_header(app)
 
 
 # ---------------------------------------------------------------------------
-# Serve frontend static files (production build)
+# Serve frontend SPA (production build)
 # ---------------------------------------------------------------------------
 
 _frontend_dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 if _frontend_dist.is_dir():
-    app.mount("/", StaticFiles(directory=str(_frontend_dist), html=True), name="frontend")
-    logger.info("Serving frontend from %s", _frontend_dist)
+    from starlette.exceptions import HTTPException as StarletteHTTPException
+    from fastapi.responses import FileResponse
+
+    # Serve static assets (JS, CSS, images) from /assets/
+    app.mount("/assets", StaticFiles(directory=str(_frontend_dist / "assets")), name="assets")
+
+    # Serve favicon and index at root
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon():
+        return FileResponse(str(_frontend_dist / "favicon.ico"))
+
+    @app.get("/", include_in_schema=False)
+    async def serve_root():
+        return FileResponse(str(_frontend_dist / "index.html"))
+
+    # SPA fallback: override the default 404 handler to serve index.html
+    # for any path that isn't an API route. This lets react-router handle
+    # client-side routes like /chat, /documents, /settings, etc.
+    _index_html = _frontend_dist / "index.html"
+
+    @app.exception_handler(StarletteHTTPException)
+    async def spa_404_handler(request, exc):
+        if exc.status_code == 404:
+            path = request.url.path
+            # API routes get normal JSON 404
+            if path.startswith("/v1/") or path.startswith("/docs") or path == "/health":
+                from fastapi.responses import JSONResponse
+                return JSONResponse({"detail": "Not Found"}, status_code=404)
+            # Everything else gets index.html for SPA routing
+            if _index_html.exists():
+                return FileResponse(str(_index_html))
+        # Non-404 errors pass through
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"detail": str(exc.detail)}, status_code=exc.status_code)
+
+    logger.info("Serving frontend SPA from %s", _frontend_dist)
 
 
 # ---------------------------------------------------------------------------
