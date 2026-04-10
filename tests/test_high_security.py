@@ -186,9 +186,14 @@ class TestHigh2_MCPApproval:
 class TestHigh3_SessionEncryption:
     """Session files must be encrypted, not plain JSON."""
 
-    def test_session_encrypt_decrypt_roundtrip(self):
+    def test_session_encrypt_decrypt_roundtrip(self, monkeypatch):
         """Encrypted session data can be decrypted back."""
+        from cryptography.fernet import Fernet
         from saido_agent.cli.repl import _encrypt_session, _decrypt_session
+
+        # Use a fixed key so encrypt/decrypt share it (no OS keyring in CI)
+        fixed = Fernet(Fernet.generate_key())
+        monkeypatch.setattr("saido_agent.cli.repl._get_session_fernet", lambda: fixed)
 
         data = {
             "messages": [{"role": "user", "content": "hello"}],
