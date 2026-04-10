@@ -44,3 +44,5 @@ test_*/
 
 # Logs
 *.log
+*.egg-info/
+*.pyc
