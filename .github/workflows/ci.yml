@@ -34,7 +34,7 @@ jobs:
       - name: Install Saido Agent with test deps
         run: pip install -e . && pip install pytest
       - name: Run tests
-        run: python -m pytest tests/ -v --timeout=60
+        run: python -m pytest tests/ -v
 
   docker:
     runs-on: ubuntu-latest
