@@ -33,6 +33,7 @@ COPY saido_agent/ saido_agent/
 # Build wheel and install into a virtual env so we can copy it cleanly
 RUN python -m venv /opt/venv && \
     /opt/venv/bin/pip install --no-cache-dir --upgrade pip && \
+    /opt/venv/bin/pip install --no-cache-dir git+https://github.com/SaidoLabsLLC/SmartRAG.git && \
     /opt/venv/bin/pip install --no-cache-dir .
 
 # ---------------------------------------------------------------------------
