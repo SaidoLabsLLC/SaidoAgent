@@ -24,7 +24,7 @@ WORKDIR /build
 
 # Install build-time system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc libffi-dev && \
+    gcc libffi-dev git && \
     rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml .
