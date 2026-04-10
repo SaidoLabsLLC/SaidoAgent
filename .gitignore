@@ -1,7 +1,46 @@
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Environment
 .env
+.env.local
 *.enc
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Frontend
 frontend/node_modules/
 frontend/dist/
 frontend/dist-node/
+
+# Knowledge stores (local data)
+knowledge/
+test_*/
+
+# Saido Agent local config (secrets)
+.saido_agent/
+
+# SQLite databases
+*.db
+
+# Logs
+*.log
