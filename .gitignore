@@ -46,3 +46,4 @@ test_*/
 *.log
 *.egg-info/
 *.pyc
+Saido_Agent_*.md
