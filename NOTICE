@@ -1,3 +1,49 @@
-This product includes software developed by SafeRL-Lab (UC Berkeley).
-Original source: github.com/SafeRL-Lab/nano-claude-code.
-Modifications by Saido Labs LLC.
+Saido Agent
+Copyright (c) 2026 Saido Labs LLC. All rights reserved.
+
+================================================================================
+THIRD-PARTY NOTICES
+================================================================================
+
+1. nano-claude-code
+   Copyright SafeRL-Lab, UC Berkeley
+   Licensed under Apache License 2.0
+   https://github.com/SafeRL-Lab/nano-claude-code
+
+   Saido Agent is derived from nano-claude-code. The original agent core,
+   provider system, tool execution engine, memory system, MCP client, plugin
+   loader, multi-agent system, and task management were forked and modified.
+   All modifications by Saido Labs LLC.
+
+2. SmartRAG
+   Copyright (c) 2026 Saido Labs LLC
+   Licensed under Apache 2.0 + Saido Labs commercial terms
+   https://github.com/SaidoLabsLLC/SmartRAG
+
+   Saido Agent uses SmartRAG as its retrieval and document storage engine.
+   SmartRAG is a separate Saido Labs product with its own license.
+   Commercial use of SmartRAG requires a separate commercial license.
+   Contact: jesse@saidolabs.com
+
+================================================================================
+SAIDO LABS ADDITIONS
+================================================================================
+
+The following modules were created by Saido Labs LLC and are NOT derived from
+nano-claude-code:
+
+  - Knowledge engine (saido_agent/knowledge/) — ingest, compile, query,
+    grounding, linting, indexing, structural analysis, synthetic data,
+    fine-tuning, report generation
+  - SmartRAG bridge (saido_agent/knowledge/bridge.py)
+  - Model routing engine (saido_agent/core/routing.py, cost_tracker.py)
+  - Security hardening (saido_agent/core/permissions.py, ssrf.py)
+  - Voice SDK (saido_agent/voice/) — STT, VAD, TTS, pipeline
+  - REST API (saido_agent/api/) — server, routes, auth, RBAC, billing,
+    enterprise features, WebSocket
+  - Plugin marketplace (saido_agent/plugins/marketplace.py)
+  - React web UI (frontend/)
+  - All test files (tests/)
+  - Deployment infrastructure (Dockerfile, docker-compose, CI/CD, migrations)
+
+These additions are subject to the Saido Labs dual license terms in LICENSE.

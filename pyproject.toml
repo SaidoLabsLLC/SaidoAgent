@@ -7,8 +7,15 @@ name = "saido-agent"
 version = "0.1.0"
 description = "Knowledge-compounding AI agent platform by Saido Labs LLC"
 requires-python = ">=3.11"
-license = {text = "Apache-2.0"}
-authors = [{name = "Saido Labs LLC"}]
+license = {text = "Apache-2.0 AND Proprietary"}
+authors = [{name = "Saido Labs LLC", email = "jesse@saidolabs.com"}]
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "License :: Other/Proprietary License",
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 
 dependencies = [
     "anthropic>=0.40.0",

@@ -162,9 +162,15 @@ analysis = sports_brain.query("Compare Player A's last 5 matches against our mid
 
 ## License
 
-Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
+**Dual-licensed.** See [LICENSE](LICENSE) for full terms.
 
-This product includes software originally developed by SafeRL-Lab (UC Berkeley). See [NOTICE](NOTICE) for attribution.
+- **Upstream code** (forked from nano-claude-code by SafeRL-Lab) — Apache License 2.0
+- **Saido Labs additions** (knowledge engine, voice SDK, API, billing, etc.) — proprietary with open source access. Free for personal/non-commercial use. **Commercial use requires a paid license.**
+- **SmartRAG dependency** — separate Saido Labs product, also dual-licensed. Commercial use requires its own license.
+
+For commercial licensing: **jesse@saidolabs.com**
+
+See [NOTICE](NOTICE) for full attribution and third-party notices.
 
 ---
 
