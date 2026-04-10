@@ -7,7 +7,7 @@ Public API surface:
   - ``STTProvider``    -- STT provider ABC
   - ``TTSProvider``    -- TTS provider ABC
 
-Legacy API (from nano-claude-code port):
+Legacy API:
   - ``voice_input()``  -- record-and-transcribe convenience function
   - ``check_voice_deps()`` -- dependency availability check
 """
